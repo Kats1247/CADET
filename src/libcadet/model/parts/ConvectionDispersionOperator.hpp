@@ -24,6 +24,7 @@
 #include "Memory.hpp"
 #include "Weno.hpp"
 #include "SimulationTypes.hpp"
+#include <ParamReaderHelper.hpp>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -93,6 +94,9 @@ public:
 
 	inline double cellCenter(unsigned int idx) const CADET_NOEXCEPT { return static_cast<double>(_colLength) / _nCol * (idx + 0.5); }
 	inline double relativeCoordinate(unsigned int idx) const CADET_NOEXCEPT { return (0.5 + idx) / _nCol; }
+	inline const active& currentVelocity() const CADET_NOEXCEPT { return _curVelocity; }
+	inline const active* currentDispersion(const int secIdx) const CADET_NOEXCEPT { return getSectionDependentSlice(_colDispersion, _nComp, secIdx); }
+	inline const bool dispersionCompIndep() const CADET_NOEXCEPT { return _dispersionCompIndep; }
 
 	inline unsigned int nComp() const CADET_NOEXCEPT { return _nComp; }
 	inline unsigned int nCol() const CADET_NOEXCEPT { return _nCol; }
