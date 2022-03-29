@@ -611,6 +611,8 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 
 	Indexer idxr(_disc);
 
+	Eigen::Map<VectorXd> r(rhs, numDofs()); // map rhs to Eigen object
+
 	Eigen::SparseLU<Eigen::SparseMatrix<double>> bulkSolver;
 	//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> solver;
 
@@ -656,10 +658,7 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 
 	// rhs is passed twice but due to the values in jacA the writes happen to a different area of the rhs than the reads.
 
-	//_jacInlet.multiplySubtract(rhs, rhs + idxr.offsetC());
 	// handle inlet DOFs
-	// map rhs to Eigen object
-	Eigen::Map<VectorXd> r(rhs, numDofs());
 	for (int comp = 0; comp < _disc.nComp; comp++) {
 		for (int node = 0; node < (_disc.modal ? _disc.nNodes : 1); node++) {
 			r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
@@ -673,6 +672,7 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	// to solving the particle blocks
 
 	r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+
 	if (cadet_unlikely(bulkSolver.info() != Eigen::Success))
 	{
 		LOG(Error) << "Solve() failed for bulk block";
@@ -686,7 +686,6 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 			LOG(Error) << "Solve() failed for par type block " << type;
 		}
 	}
-
 
 	// Solve last row of L with backwards substitution: y_f = b_f - \sum_{i=0}^{N_z} J_{f,i} y_i
 	// Note that we cannot easily parallelize this loop since the results of the sparse
@@ -737,14 +736,13 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	double* const rhsCol = rhs + idxr.offsetC();
 
 	// Apply J_0^{-1} to tempState_0
-	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(_tmpState.segment(0, _disc.nComp * _disc.nPoints));
-	//const bool result = _convDispOp.solveDiscretizedJacobian(localCol);
+	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+
 	if (cadet_unlikely(bulkSolver.info() != Eigen::Success))
 	{
 		LOG(Error) << "Solve() failed for bulk block";
 	}
 
-	// Compute rhs_0 = y_0 - J_0^{-1} * J_{0,f} * y_f = y_0 - tempState_0
 	for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
 		rhsCol[i] -= localCol[i];
 
