@@ -613,9 +613,6 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 
 	Eigen::Map<VectorXd> r(rhs, numDofs()); // map rhs to Eigen object
 
-	Eigen::SparseLU<Eigen::SparseMatrix<double>> bulkSolver;
-	//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> solver;
-
 	// ==== Step 1: Factorize diagonal Jacobian blocks
 
 	// Factorize partial Jacobians only if required
@@ -627,9 +624,10 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 		// Assemble and factorize discretized bulk Jacobian
 		assembleDiscretizedBulkJacobian(alpha, idxr);
 
-		bulkSolver.compute(_jacCdisc);
+		_bulkSolver.factorize(_jacCdisc);
+		//_bulkSolver.compute(_jacCdisc);
 
-		if (cadet_unlikely(bulkSolver.info() != Eigen::Success)) {
+		if (cadet_unlikely(_bulkSolver.info() != Eigen::Success)) {
 			LOG(Error) << "Factorize() failed for bulk block";
 		}
 
@@ -671,9 +669,9 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	// Threads that are done with solving the bulk column blocks can proceed
 	// to solving the particle blocks
 
-	r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+	r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
 
-	if (cadet_unlikely(bulkSolver.info() != Eigen::Success))
+	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
 	{
 		LOG(Error) << "Solve() failed for bulk block";
 	}
@@ -736,9 +734,9 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	double* const rhsCol = rhs + idxr.offsetC();
 
 	// Apply J_0^{-1} to tempState_0
-	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
 
-	if (cadet_unlikely(bulkSolver.info() != Eigen::Success))
+	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
 	{
 		LOG(Error) << "Solve() failed for bulk block";
 	}
@@ -807,11 +805,10 @@ int LumpedRateModelWithPoresDG::schurComplementMatrixVector(double const* x, dou
 
 
 	// Apply J_0^{-1}
-	Eigen::SparseLU<Eigen::SparseMatrix<double>> bulkSolver;
-	bulkSolver.compute(_jacCdisc);
-	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+	//_bulkSolver.factorize(_jacCdisc); // already factorized !
+	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
 
-	if (cadet_unlikely(bulkSolver.info() != Eigen::Success))
+	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
 	{
 		LOG(Error) << "Solve() failed for bulk block";
 	}
