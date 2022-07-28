@@ -679,7 +679,7 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 
 			linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }));
 
-			// do not add time derivative to particle mass balance equation at inner particle boundary for special case
+			// If special case: Do not add time derivative to particle mass balance equation at inner particle boundary for mass balance(s)
 			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0) {
 				// we still need to add the derivative for the binding
 				// move iterator to solid phase
@@ -691,6 +691,10 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 					if (_binding[parType]->reactionQuasiStationarity()[bnd])
 						continue;
 
+					// surface diffusion + kinetic binding -> additional DG-discretized mass balance equation for solid
+					else if (_hasSurfaceDiffusion[parType]) // TODO: account for all bound states, only some might not be affected by surface diffusion!
+						continue;
+
 					// Add derivative with respect to dq / dt to Jacobian
 					jac[0] += alpha;
 				}
@@ -699,7 +703,7 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 				addTimeDerivativeToJacobianParticleShell(jac, idxr, alpha, parType);
 			}
 
-			// compute time derivative of remaining points (all but the inner boundary one)
+			// compute time derivative of remaining points
 			// Iterator jac has already been advanced to next shell
 			for (unsigned int j = 1; j < _disc.nParPoints[parType]; ++j)
 			{
