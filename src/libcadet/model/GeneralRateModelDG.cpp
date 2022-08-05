@@ -1178,12 +1178,18 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 	Eigen::Map<Eigen::VectorXd> resi(resPtr, numDofs());
 	resi.setZero();
 
-	// reset jacobian, if new jacobian is to be estimated TODO: check if this is necessary. 
-	// -> wegen der binding eintraege musste die particle jacobi eintraege fuer den fall surfDiff + dynBinding auf += gesetzt werden.
-	// daher wuerden eintraege, die nicht vom binding beruehrt werden aber von der mass balance ohne die zuruecksetzung der jacobi kumulieren..?
+
 	if (wantJac && _disc.newStaticJac) {
-		for (int i = 0; i < _globalJac.nonZeros(); i++) {
-			_globalJac.valuePtr()[i] = 0.0;
+
+		//// estimate new static (per section) jacobian
+		//// @TODO ? also reset pattern: if surface diffusion parameter changes to zero in section transition, the pattern also changes (special case SurfDiff+kinetic binding)
+		bool success = calcStaticAnaJacobian_GRM(secIdx);
+
+		_disc.newStaticJac = false;
+
+		if (cadet_unlikely(!success)) {
+			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation";
+			//_globalJac.makeCompressed(); // dont compress entries that are possibly not set yet (time derivative, jacDisc is copied from jac)
 		}
 	}
 
@@ -1193,9 +1199,20 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
 	{
-		const unsigned int type = pblk / _disc.nPoints;
+		const unsigned int parType = pblk / _disc.nPoints;
 		const unsigned int par = pblk % _disc.nPoints;
-		residualParticle<StateType, ResidualType, ParamType, wantJac>(t, type, par, secIdx, y, yDot, res, threadLocalMem);
+		residualParticle<StateType, ResidualType, ParamType, wantJac>(t, parType, par, secIdx, y, yDot, res, threadLocalMem);
+	}
+
+	// we need to add the DG discretized solid entries of the jacobian that get overwritten by the binding kernel.
+	// These entries only exist for surface diffusion combined with kinetic binding.
+	if (wantJac) {
+		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
+			if (_binding[parType]->reactionQuasiStationarity() && _hasSurfaceDiffusion[parType]) {
+				active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
+				addSolidDGentries(parType, _parSurfDiff);
+			}
+		}
 	}
 
 	BENCH_STOP(_timerResidualPar);
@@ -1208,19 +1225,6 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 		res[i] = y[i];
 	}
 
-	// estimate new static (per section) jacobian
-	if (wantJac && _disc.newStaticJac) {
-
-		// @TODO ? also reset pattern: if surface diffusion parameter changes to zero in section transition, the pattern also changes (special case SurfDiff+kinetic binding)
-		bool success = calcStaticAnaJacobian_GRM(secIdx);
-		_disc.newStaticJac = false;
-
-		if (cadet_unlikely(!success)) {
-			LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation";
-			//_globalJac.makeCompressed(); // dont compress entries that are possibly not set yet (time derivative, jacDisc is copied from jac)
-		}
-
-	}
 
 	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
 	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
@@ -1351,17 +1355,9 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 		// TODO Check Treatment of reactions (do we need yDot then?)
 		if (cadet_unlikely(par == 0 && specialCase)) {
 
-			// Only update static binding jacobian when DG jacobian is updated. Theoretically, this is only required
-			// for surface diffusion combined with a kinetic binding, because solid entries would be overwritten here 
-			if (_disc.newStaticJac) // function template only takes compile-time constant expression as input, so we cant plug the variable in directly..
-
-				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, true, true>(
-					t, secIdx, colPos, local_y, nullptr, local_res, jac, cellResParams, tlmAlloc // TODO Check Treatment of reactions (do we need yDot then?)
-					);
-			else
-				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, false, true>(
-					t, secIdx, colPos, local_y, nullptr, local_res, jac, cellResParams, tlmAlloc // TODO Check Treatment of reactions (do we need yDot then?)
-					);
+			parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
+				t, secIdx, colPos, local_y, nullptr, local_res, jac, cellResParams, tlmAlloc // TODO Check Treatment of reactions (do we need yDot then?)
+				);
 
 			if (cellResParams.binding->hasDynamicReactions() && local_yDot)
 			{
@@ -1389,17 +1385,11 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 			}
 		}
 		else {
-			// Only update static binding jacobian when DG jacobian is updated. Theoretically, this is only required
-			// for surface diffusion combined with a kinetic binding, because solid entries would be overwritten here 
-			if (_disc.newStaticJac) // function template only takes compile-time constant expression as input, so we cant plug the variable in directly..
 
-				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, true, true>(
-					t, secIdx, colPos, local_y, local_yDot, local_res, jac, cellResParams, tlmAlloc
-					);
-			else
-				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, false, true>(
-					t, secIdx, colPos, local_y, local_yDot, local_res, jac, cellResParams, tlmAlloc
-					);
+			parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
+				t, secIdx, colPos, local_y, local_yDot, local_res, jac, cellResParams, tlmAlloc
+				);
+
 		}
 
 		// move rowiterator to next particle node
