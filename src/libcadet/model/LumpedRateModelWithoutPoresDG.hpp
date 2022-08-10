@@ -207,15 +207,15 @@ protected:
 	void checkAnalyticJacobianAgainstAd(active const* const adRes, unsigned int adDirOffset) const;
 #endif
 
-	class Discretization // @TODO: separate convDisp DGoperator class
-	{ 	// NOTE: no different Riemann solvers or boundary conditions
+	class Discretization
+	{
 	public:
 		unsigned int nComp; //!< Number of components
 		unsigned int nCol; //!< Number of column cells
 		unsigned int polyDeg; //!< polynomial degree
 		unsigned int nNodes; //!< Number of nodes per cell
 		unsigned int nPoints; //!< Number of discrete Points
-		double deltaZ;
+		double deltaZ; //!< cell spacing
 		bool exactInt;	//!< 1 for exact integration, 0 for LGL quadrature
 		Eigen::VectorXd nodes; //!< Array with positions of nodes in reference element
 		Eigen::MatrixXd polyDerM; //!< Array with polynomial derivative Matrix
@@ -237,12 +237,12 @@ protected:
 		double porosity;
 		// Section dependent parameters
 
-		Eigen::VectorXd g;
-		Eigen::VectorXd h;
+		Eigen::VectorXd g; //!< auxiliary variable
+		Eigen::VectorXd h; //!< auxiliary substitute
 		Eigen::VectorXd surfaceFlux; //!< stores the surface flux values
 		Eigen::Vector4d boundary; //!< stores the boundary values from Danckwert boundary conditions
 
-		std::vector<bool> isKinetic;
+		std::vector<bool> isKinetic; //!< binding kinetics
 
 		bool newStaticJac; //!< determines wether static analytical jacobian needs to be computed (every section)
 
@@ -273,7 +273,6 @@ protected:
 
 			newStaticJac = true;
 
-			// @TODO: make exact, inexact integration switch during calculation possible?
 			lglNodesWeights();
 			invMMatrix();
 			derivativeMatrix();
@@ -647,9 +646,6 @@ protected:
 				}
 			}
 
-			//std::cout << "NEW SECTION: " << _disc.curSection << std::endl;
-			//std::cout << "v: " << _disc.velocity << std::endl;
-			//std::cout << "D_ax: " << _disc.dispersion << std::endl;
 		}
 	}
 
@@ -978,7 +974,6 @@ protected:
 
 		/*		Inner cell dispersion blocks		*/
 
-
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell
 
 		// insert Blocks to Jacobian inner cells (only for nCells >= 3)
@@ -987,11 +982,15 @@ protected:
 				for (unsigned int comp = 0; comp < nComp; comp++) {
 					for (unsigned int i = 0; i < nNodes; i++) {
 						for (unsigned int j = 0; j < 3 * nNodes; j++) {
-							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-							// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
-								offC + (cell - 1) * sCell + comp * sComp + j * sNode,
-								0.0));
+							// pattern is more sparse than a nNodes x 3*nNodes block.
+							if(	(j >= nNodes - 1 && j <= 2 * nNodes) ||
+								(i == 0 && j <= 2 * nNodes)			 ||
+								(i == nNodes - 1 && j >= nNodes - 1) )
+								// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each entry
+								// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each entry
+								tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+														offC + (cell - 1) * sCell + comp * sComp + j * sNode,
+														0.0));
 						}
 					}
 				}
@@ -1004,9 +1003,13 @@ protected:
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < nNodes; i++) {
 					for (unsigned int j = nNodes; j < 3 * nNodes; j++) {
-						tripletList.push_back(T(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - nNodes) * sNode,
-							0.0));
+						// pattern is more sparse than a nNodes x 2*nNodes block.
+						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+							(i == 0 && j <= 2 * nNodes)			 ||
+							(i == nNodes - 1 && j >= nNodes - 1) )
+							tripletList.push_back(T(offC + comp * sComp + i * sNode,
+													offC + comp * sComp + (j - nNodes) * sNode,
+													0.0));
 					}
 				}
 			}
@@ -1014,9 +1017,13 @@ protected:
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < nNodes; i++) {
 					for (unsigned int j = 0; j < 2 * nNodes; j++) {
-						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode,
-							0.0));
+						// pattern is more sparse than a nNodes x 2*nNodes block.
+						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+							(i == 0 && j <= 2 * nNodes)			 ||
+							(i == nNodes - 1 && j >= nNodes - 1) )
+							tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+													offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode,
+													0.0));
 					}
 				}
 			}
@@ -1085,8 +1092,8 @@ protected:
 							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 							// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry
 							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
-								offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
-								0.0));
+													offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
+													0.0));
 						}
 					}
 				}
@@ -1103,8 +1110,8 @@ protected:
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry. Also adjust for iterator j (-1)
 						tripletList.push_back(T(offC + nNodes * sNode + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - 1) * sNode,
-							0.0));
+												offC + comp * sComp + (j - 1) * sNode,
+												0.0));
 					}
 				}
 			}
@@ -1116,8 +1123,8 @@ protected:
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry. Also adjust for iterator j (-1)
 						tripletList.push_back(T(offC + nNodes * sNode + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - 1) * sNode,
-							0.0));
+												offC + comp * sComp + (j - 1) * sNode,
+												0.0));
 					}
 				}
 			}
@@ -1130,8 +1137,8 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry.
 						tripletList.push_back(T(offC + (nCells - 2) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
-							0.0));
+												offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
+												0.0));
 					}
 				}
 			}
@@ -1161,8 +1168,8 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry.
 						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
-							0.0));
+												offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode,
+												0.0));
 					}
 				}
 			}
@@ -1174,8 +1181,8 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry.
 						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1) * sCell - (nNodes) * sNode + comp * sComp + j * sNode,
-							0.0));
+												offC + (nCells - 1) * sCell - (nNodes) * sNode + comp * sComp + j * sNode,
+												0.0));
 					}
 				}
 			}
@@ -1214,12 +1221,6 @@ protected:
 	*/
 	int calcStaticAnaJacobian(double t, unsigned int secIdx, const double* const y, util::ThreadLocalStorage& threadLocalMem) {
 
-		// not necessary: set _jac to zero but keep pattern ! (.setZero() deletes pattern)
-		//double* vPtr = _jac.valuePtr();
-		//for (int k = 0; k < _jac.nonZeros(); k++) {
-		//	vPtr[k] = 0.0;
-		//}
-
 		// DG convection dispersion Jacobian
 		if (_disc.exactInt)
 			calcConvDispModalJacobian();
@@ -1228,16 +1229,6 @@ protected:
 
 		if (!_jac.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
 			return 0;
-
-		//MatrixXd mat = _jac.toDense()*10;
-		//for (int i = 0; i < mat.rows(); i++) {
-		//	for (int j = 0; j < mat.cols(); j++) {
-		//		if (mat(i, j) != 0) {
-		//			mat(i, j) = 1.0;
-		//		}
-		//	}
-		//}
-		//std::cout << std::fixed << std::setprecision(0) << "JAC\n" << mat << std::endl; // #include <iomanip>
 
 		return 1;
 	}
@@ -1310,10 +1301,14 @@ protected:
 				for (unsigned int comp = 0; comp < nComp; comp++) {
 					for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 						for (unsigned int j = 0; j < dispBlock.cols(); j++) {
-							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-							// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-							_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-								offC + (cell - 1) * sCell + comp * sComp + j * sNode)
+							// pattern is more sparse than a nNodes x 3*nNodes block.
+							if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+								(i == 0 && j <= 2 * nNodes) ||
+								(i == nNodes - 1 && j >= nNodes - 1))
+								// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
+								// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
+								_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+											  offC + (cell - 1) * sCell + comp * sComp + j * sNode)
 								= -dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
@@ -1342,8 +1337,12 @@ protected:
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes; j < dispBlock.cols(); j++) {
-						_jac.coeffRef(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - nNodes) * sNode)
+						// pattern is more sparse than a nNodes x 2*nNodes block.
+						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+							(i == 0 && j <= 2 * nNodes) ||
+							(i == nNodes - 1 && j >= nNodes - 1))
+							_jac.coeffRef(offC + comp * sComp + i * sNode,
+										  offC + comp * sComp + (j - nNodes) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1386,9 +1385,13 @@ protected:
 		for (unsigned int comp = 0; comp < nComp; comp++) {
 			for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 				for (unsigned int j = 0; j < 2 * nNodes; j++) {
-					_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-								  offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
-								  = -dispBlock(i, j) * _disc.dispersion[comp];
+					// pattern is more sparse than a nNodes x 2*nNodes block.
+					if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+						(i == 0 && j <= 2 * nNodes) ||
+						(i == nNodes - 1 && j >= nNodes - 1))
+						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+									  offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
+									= -dispBlock(i, j) * _disc.dispersion[comp];
 				}
 			}
 		}
@@ -1419,16 +1422,12 @@ protected:
 		for (unsigned int cell = 1; cell < nCells; cell++) {
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < convBlock.rows(); i++) {
-					//Eigen::SparseMatrix<double, RowMajor>::InnerIterator it(_jac, offC + cell * sCell + comp * sComp + i * sNode);
-					//it += _disc.polyDeg; // jump over dispersion block entries
 					for (unsigned int j = 0; j < convBlock.cols(); j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
 						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
 						_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
 									  offC + cell * sCell - sNode + comp * sComp + j * sNode)
 									  += -convBlock(i, j);
-						//it.valueRef() += -convBlock(i, j);
-						//++it;
 					}
 				}
 			}
@@ -1475,8 +1474,8 @@ protected:
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		// NOTE: N = polyDeg
-		//  indices  gStarDC    :     0   ,   1   , ..., nNodes; nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
-		//	derivative index j  : -(N+1)-1, -(N+1),... ,  -1   ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
+		// indices  gStarDC    :     0   ,   1   , ..., nNodes; nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
+		// derivative index j  : -(N+1)-1, -(N+1),... ,  -1   ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
 		// auxiliary block [d g^* / d c]
 		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
 		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
@@ -1753,7 +1752,7 @@ protected:
 							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 							// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry
 							_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-								offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+										  offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 								= -dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
@@ -1774,7 +1773,7 @@ protected:
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry. Also adjust for iterator j (-1)
 						_jac.coeffRef(offC + nNodes * sNode + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - 1) * sNode)
+									  offC + comp * sComp + (j - 1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1790,7 +1789,7 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + (nCells - 2) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+									  offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1810,7 +1809,7 @@ protected:
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1826,7 +1825,7 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for relevant dispersion block entries.
 						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+									  offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1843,7 +1842,7 @@ protected:
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1857,7 +1856,7 @@ protected:
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1869,7 +1868,7 @@ protected:
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-							offC + (nCells - 1) * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
+									  offC + (nCells - 1) * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1883,7 +1882,7 @@ protected:
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cell, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + 1 * sCell + comp * sComp + i * sNode,
-							offC + 1 * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
+									  offC + 1 * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
