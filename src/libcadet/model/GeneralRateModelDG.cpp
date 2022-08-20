@@ -1206,9 +1206,10 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	// we need to add the DG discretized solid entries of the jacobian that get overwritten by the binding kernel.
 	// These entries only exist for surface diffusion combined with kinetic binding.
+	// todo component specific
 	if (wantJac) {
 		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
-			if (_binding[parType]->reactionQuasiStationarity() && _hasSurfaceDiffusion[parType]) {
+			if (!_binding[parType]->reactionQuasiStationarity() && _hasSurfaceDiffusion[parType]) {
 				active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 				addSolidDGentries(parType, _parSurfDiff);
 			}
