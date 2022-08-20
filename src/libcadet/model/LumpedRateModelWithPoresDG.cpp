@@ -150,7 +150,7 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	else
 	{
 		// Infer number of particle types
-		_disc.nParType = *new unsigned int[nBound.size() / _disc.nComp];
+		_disc.nParType = nBound.size() / _disc.nComp;
 		_disc.nBound = new unsigned int[_disc.nComp * _disc.nParType];
 		std::copy_n(nBound.begin(), _disc.nComp * _disc.nParType, _disc.nBound);
 	}
