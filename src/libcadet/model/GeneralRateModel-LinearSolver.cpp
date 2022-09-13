@@ -679,8 +679,9 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 
 			linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }));
 
-			// If special case: Do not add time derivative to particle mass balance equation at inner particle boundary for mass balance(s)
-			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0) {
+			// If special case for inexact integration DG scheme:
+			// Do not add time derivative to particle mass balance equation at inner particle boundary for mass balance(s)
+			if (!_disc.parExactInt[parType] && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0) {
 				// we still need to add the derivative for the binding
 				// move iterator to solid phase
 				jac += idxr.strideParLiquid();
