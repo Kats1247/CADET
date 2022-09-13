@@ -3278,11 +3278,12 @@ protected:
 							= -2.0 / _disc.deltaR[type] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 					}
 					else {
-						for (unsigned int node = 0; node < _disc.nParNode[type]; node++, jacCpF -= idxr.strideParShell(type)) {
+						for (int node = _disc.parPolyDeg[type]; node >= 0; node--, jacCpF -= idxr.strideParShell(type)) {
 							// row: already at particle. Already at current node and liquid state.
 							// col: go to flux of current parType. jump over previous colNodes and add component offset
 							jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
-								= liftContribution * (-2.0 / _disc.deltaR[type] * _disc.parInvMM[type](node, 0) / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]));
+								//= - 2.0 / _disc.deltaR[type] * (_disc.parInvMM[type] * B)(node, _disc.parPolyDeg[type]) * 1.0 / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+							= - 2.0 / _disc.deltaR[type] * _disc.parInvMM[type](node, _disc.nParNode[type] - 1) * liftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						}
 						// set back iterator to first node as required by component loop
 						jacCpF += _disc.nParNode[type] * idxr.strideParShell(type);
