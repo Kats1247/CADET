@@ -290,6 +290,7 @@ protected:
 		unsigned int* nBoundBeforeType; //!< Array with number of bound states before a particle type (cumulative sum of strideBound)
 
 		const double SurfVolRatioSlab = 1.0; //!< Surface to volume ratio for a slab-shaped particle
+		const double SurfVolRatioCylinder = 2.0; //!< Surface to volume ratio for a cylindrical particle
 		const double SurfVolRatioSphere = 3.0; //!< Surface to volume ratio for a spherical particle
 
 		//////////////////////		DG specifics		////////////////////////////////////////////////////#
@@ -304,8 +305,9 @@ protected:
 		Eigen::MatrixXd invMM; //!< dense inverse mass matrix for exact integration
 		Eigen::VectorXd* parNodes; //!< Array with positions of nodes in radial reference element for each particle
 		Eigen::MatrixXd* parPolyDerM; //!< Array with polynomial derivative Matrix for each particle
+		Eigen::MatrixXd* minus_InvMM_ST; //!< equals minus inverse mass matrix times transposed stiffness matrix. Required solely for exact integration DG discretization of particle equation
 		Eigen::VectorXd* parInvWeights; //!< Array with weights for LGL quadrature of size nNodes for each particle
-		Eigen::MatrixXd* parInvMM; //!< dense !INVERSE! mass matrix for exact integration for each particle
+		Eigen::MatrixXd* parInvMM; //!< dense inverse mass matrix for exact integration for each particle
 		Eigen::VectorXd* Ir; //!< metric part for each particle type and cell, particle type major ordering
 		Eigen::MatrixXd* Dr; //!< derivative matrices including metrics for each particle type and cell, particle type major ordering
 		Eigen::VectorXi offsetMetric; //!< offset in metrics Ir, Dr -> summed up nCells of all previous parTypes
@@ -368,8 +370,9 @@ protected:
 			surfaceFluxParticle = new VectorXd [nParType];
 			parNodes = new VectorXd [nParType];
 			parInvWeights = new VectorXd [nParType];
-			parPolyDerM = new MatrixXd [nParType];
-			parInvMM = new MatrixXd [nParType];
+			parPolyDerM = new MatrixXd[nParType];
+			minus_InvMM_ST = new MatrixXd [nParType];
+			parInvMM = new MatrixXd[nParType];
 			localFlux = new double[1];
 
 			for (int parType = 0; parType < nParType; parType++) {
@@ -388,6 +391,8 @@ protected:
 				parInvWeights[parType].setZero();
 				parPolyDerM[parType].resize(nParNode[parType], nParNode[parType]);
 				parPolyDerM[parType].setZero();
+				minus_InvMM_ST[parType].resize(nParNode[parType], nParNode[parType]);
+				minus_InvMM_ST[parType].setZero();
 				parInvMM[parType].resize(nParNode[parType], nParNode[parType]);
 				parInvMM[parType].setZero();
 			}
@@ -402,13 +407,14 @@ protected:
 
 			// compute DG operators for bulk and every particle
 			lglNodesWeights(polyDeg, nodes, invWeights);
-			invMM = invMMatrix(nNodes, nodes);
+			// Mass matrix for exact integration via transformation to normalized Legendre polynomials
+			invMM = invMMatrix(nNodes, nodes, 0.0, 0.0);
 			derivativeMatrix(polyDeg, polyDerM, nodes);
 
 			for (int parType = 0; parType < nParType; parType++) {
 				lglNodesWeights(parPolyDeg[parType], parNodes[parType], parInvWeights[parType]);
-				parInvMM[parType] = invMMatrix(nParNode[parType], parNodes[parType]);
 				derivativeMatrix(parPolyDeg[parType], parPolyDerM[parType], parNodes[parType]);
+				// Note that metric term dependent DG tools are computed in updateRadialDisc()
 			}
 		}
 
@@ -534,59 +540,51 @@ protected:
 
 		/**
 		 * @brief factor to normalize legendre polynomials
-		 */
-		double orthonFactor(const int _polyDeg) {
+		*/
+		double orthonFactor(const int _polyDeg, double a, double b) {
 
 			double n = static_cast<double> (_polyDeg);
-			// alpha = beta = 0 to get legendre polynomials as special case from jacobi polynomials.
-			double a = 0.0;
-			double b = 0.0;
 			return std::sqrt(((2.0 * n + a + b + 1.0) * std::tgamma(n + 1.0) * std::tgamma(n + a + b + 1.0))
 				/ (std::pow(2.0, a + b + 1.0) * std::tgamma(n + a + 1.0) * std::tgamma(n + b + 1.0)));
 		}
-
 		/**
 		 * @brief calculates the Vandermonde matrix of the normalized legendre polynomials
-		 */
-		Eigen::MatrixXd getVandermonde_LEGENDRE(const int _nNodes, const Eigen::VectorXd _nodes) {
+		*/
+		Eigen::MatrixXd getVandermonde_JACOBI(const int _nNodes, const Eigen::VectorXd _nodes, double a, double b) {
 
 			Eigen::MatrixXd V(_nNodes, _nNodes);
 
-			double alpha = 0.0;
-			double beta = 0.0;
-
 			// degree 0
-			V.block(0, 0, _nNodes, 1) = VectorXd::Ones(_nNodes) * orthonFactor(0);
+			V.block(0, 0, _nNodes, 1) = VectorXd::Ones(_nNodes) * orthonFactor(0, a, b);
 			// degree 1
 			for (int node = 0; node < static_cast<int>(_nNodes); node++) {
-				V(node, 1) = _nodes[node] * orthonFactor(1);
+				V(node, 1) = ((_nodes[node] - 1.0) / 2.0 * (a + b + 2.0) + (a + 1.0)) * orthonFactor(1, a, b);
 			}
 
 			for (int deg = 2; deg <= static_cast<int>(_nNodes - 1); deg++) {
 
 				for (int node = 0; node < static_cast<int>(_nNodes); node++) {
 
-					double orthn_1 = orthonFactor(deg) / orthonFactor(deg - 1);
-					double orthn_2 = orthonFactor(deg) / orthonFactor(deg - 2);
+					double orthn_1 = orthonFactor(deg, a, b) / orthonFactor(deg - 1, a, b);
+					double orthn_2 = orthonFactor(deg, a, b) / orthonFactor(deg - 2, a, b);
 
-					double fac_1 = ((2.0 * deg - 1.0) * 2.0 * deg * (2.0 * deg - 2.0) * _nodes[node]) / (2.0 * deg * deg * (2.0 * deg - 2.0));
-					double fac_2 = (2.0 * (deg - 1.0) * (deg - 1.0) * 2.0 * deg) / (2.0 * deg * deg * (2.0 * deg - 2.0));
-
-					V(node, deg) = orthn_1 * fac_1 * V(node, deg - 1) - orthn_2 * fac_2 * V(node, deg - 2);
-
+					// recurrence relation
+					V(node, deg) = orthn_1 * ((2.0 * deg + a + b - 1.0) * ((2.0 * deg + a + b) * (2.0 * deg + a + b - 2.0) * _nodes[node] + a * a - b * b) * V(node, deg - 1));
+					V(node, deg) -= orthn_2 * (2.0 * (deg + a - 1.0) * (deg + b - 1.0) * (2.0 * deg + a + b) * V(node, deg - 2));
+					V(node, deg) /= 2.0 * deg * (deg + a + b) * (2.0 * deg + a + b - 2.0);
 				}
-
 			}
 
 			return V;
 		}
 
+	public:
 		/**
-		* @brief calculates mass matrix for exact polynomial integration
-		* @detail exact polynomial integration leads to a full mass matrix
+		 * @brief calculates mass matrix for exact polynomial integration via transformation to Legendre polynomial coefficients
+		 * @detail exact polynomial integration leads to a full mass matrix
 		*/
-		MatrixXd invMMatrix(const int _nnodes, const Eigen::VectorXd _nodes) {
-			return (getVandermonde_LEGENDRE(_nnodes, _nodes) * (getVandermonde_LEGENDRE(_nnodes, _nodes).transpose()));
+		MatrixXd invMMatrix(const int _nnodes, const Eigen::VectorXd _nodes, double alpha, double beta) {
+			return (getVandermonde_JACOBI(_nnodes, _nodes, alpha, beta) * (getVandermonde_JACOBI(_nnodes, _nodes, alpha, beta).transpose()));
 		}
 
 	};
@@ -703,7 +701,7 @@ protected:
 		inline int strideParComp() const CADET_NOEXCEPT { return 1; }
 		inline int strideParLiquid() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp); }
 		inline int strideParBound(int parType) const CADET_NOEXCEPT { return static_cast<int>(_disc.strideBound[parType]); }
-		inline int strideParShell(int parType) const CADET_NOEXCEPT { return strideParLiquid() + strideParBound(parType); }
+		inline int strideParShell(int parType) const CADET_NOEXCEPT { return strideParLiquid() + strideParBound(parType); } // TODO: rename to strideParNode! particle shell ist eigentlich ja die elementweise schale
 		inline int strideParBlock(int parType) const CADET_NOEXCEPT { return static_cast<int>(_disc.nParPoints[parType]) * strideParShell(parType); }
 
 		inline int strideFluxNode() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp) * static_cast<int>(_disc.nParType); }
@@ -900,16 +898,24 @@ protected:
 
 		int nNodes = _disc.nParNode[parType];
 
-		/* no additional metric term for auxiliary equation -> res = - D * (d_p * c^p + invBeta_p sum_mi d_s c^s) */
-		if (aux) {
+		/* no additional metric term for auxiliary equation or particle equation with exact integration scheme
+		   -> res = - D * (d_p * c^p + invBeta_p sum_mi d_s c^s) */
+		if (aux || (_disc.parExactInt[parType] && _parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab)) {
 			// comp-cell-node state vector: use of Eigen lib performance
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				stateDer.segment(Cell * nNodes, nNodes)
 					-= _disc.parPolyDerM[parType] * state.segment(Cell * nNodes, nNodes);
 			}
 		}
+		else if (_disc.parExactInt[parType] && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			// comp-cell-node state vector: use of Eigen lib performance
+			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
+				stateDer.segment(Cell * nNodes, nNodes)
+					-= _disc.minus_InvMM_ST[parType] * state.segment(Cell * nNodes, nNodes);
+			}
+		}
 		/* include metrics for main particle equation -> res = - D * (d_p * c^p + invBeta_p sum_mi d_s c^s) */
-		else {
+		else { // inexact integration, main equation
 
 			int Cell0 = 0; // auxiliary variable to distinguish special case
 
@@ -1050,7 +1056,7 @@ protected:
 
 		// calc numerical flux values c* or h* depending on equation switch aux
 		(aux == 1) ? InterfaceFluxAuxiliary(C, strideCell, strideNode) : InterfaceFlux(C, _disc.g, Comp);
-		if (_disc.exactInt) { // modal approach -> dense mass matrix
+		if (_disc.exactInt) { // exact integration approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				for (unsigned int Node = 0; Node < _disc.nNodes; Node++) {
@@ -1062,7 +1068,7 @@ protected:
 				}
 			}
 		}
-		else { // nodal approach -> diagonal mass matrix
+		else { // inexact integration approach -> diagonal mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
 				// strong surface integral -> M^-1 B [state - state*]
 				stateDer[Cell * strideCell] // first cell node
@@ -1094,44 +1100,63 @@ protected:
 		InterfaceFluxParticle(parType, state, strideCell, strideNode, aux, comp, addParDisc);
 
 		// strong surface integral -> M^-1 B [state - state*]
+		if (!_disc.parExactInt[parType]) { // inexact integration approach -> diagonal mass matrix
+			int Cell0 = 0; // auxiliary variable to distinguish special case
+			// special case for sphere and cylinder if particle core = 0.0 -> leave out inner particle boundary flux
+			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0) {
 
-		int Cell0 = 0; // auxiliary variable to distinguish special case
-		// special case for sphere and cylinder if particle core = 0.0 -> leave out inner particle boundary flux
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0) {
+				Cell0 = 1;
 
-			Cell0 = 1;
+				stateDer[_disc.parPolyDeg[parType] * strideNode] // last cell node
+					+= _disc.parInvWeights[parType][_disc.parPolyDeg[parType]] * (state[_disc.parPolyDeg[parType] * strideNode]
+						- _disc.surfaceFluxParticle[parType][1]);
+			}
 
-			stateDer[_disc.parPolyDeg[parType] * strideNode] // last cell node
-				+= _disc.parInvWeights[parType][_disc.parPolyDeg[parType]] * (state[_disc.parPolyDeg[parType] * strideNode]
-					- _disc.surfaceFluxParticle[parType][1]);
+			for (unsigned int Cell = Cell0; Cell < _disc.nParCell[parType]; Cell++) {
+
+				stateDer[Cell * strideCell] // first cell node
+					-= _disc.parInvWeights[parType][0] * (state[Cell * strideCell]
+						- _disc.surfaceFluxParticle[parType][Cell]);
+
+				stateDer[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode] // last cell node
+					+= _disc.parInvWeights[parType][_disc.parPolyDeg[parType]] * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
+						- _disc.surfaceFluxParticle[parType][Cell + 1u]);
+			}
 		}
-
-		for (unsigned int Cell = Cell0; Cell < _disc.nParCell[parType]; Cell++) {
-
-			stateDer[Cell * strideCell] // first cell node
-				-= _disc.parInvWeights[parType][0] * (state[Cell * strideCell]
-					- _disc.surfaceFluxParticle[parType][Cell]);
-
-			stateDer[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode] // last cell node
-				+= _disc.parInvWeights[parType][_disc.parPolyDeg[parType]] * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-					- _disc.surfaceFluxParticle[parType][Cell + 1u]);
+		else { // exact integration approach -> dense mass matrix
+			unsigned int Cell = 0; // only one particle cell for exact integration
+			// strong surface integral -> M^-1 B [state - state*]
+			for (unsigned int Node = 0; Node < _disc.nParNode[parType]; Node++) {
+				if (aux) { // B has two non-zero entries
+					// we just add a zero since c^* := c
+					// stateDer[Cell * strideCell + Node * strideNode] += 0.0; // since c^* := c
+					// 
+						// placeholder for when multiple cells for inexact integration are implemented: (parInvMM_2 is the MM without any metrics contributions)
+						//_disc.parInvMM_2[parType](Node, 0) * (state[Cell * strideCell]
+						//	- _disc.surfaceFluxParticle[parType][Cell])
+						//- _disc.parInvMM_2[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
+						//	- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
+				}
+				else {
+					// B (lifting) matrix depends on metrics -> only one entry for spherical, cylindrical particle
+					// and also no SBP property for cylinder and sphere
+					if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
+						stateDer[Cell * strideCell + Node * strideNode]
+							-= _disc.parInvMM[parType](Node, 0) * (state[Cell * strideCell]
+								- _disc.surfaceFluxParticle[parType][Cell])
+							- _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
+								- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
+					} else if(_parGeomSurfToVol[parType] == _disc.SurfVolRatioCylinder) {
+						stateDer[Cell * strideCell + Node * strideNode]
+							-= 2.0 * _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][(Cell + 1u)];
+					}
+					else if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSphere) {
+						stateDer[Cell * strideCell + Node * strideNode]
+							-= 4.0 * _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][(Cell + 1u)];
+					}
+				}
+			}
 		}
-		// @TODO ? exact integration approach
-		// if (!_disc.parExactInt[parType]) { // inexact integration approach -> diagonal mass matrix
-		// ...
-		// }
-		//else { // exact integration approach -> dense mass matrix
-		//	for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
-		//		// strong surface integral -> M^-1 B [state - state*]
-		//		for (unsigned int Node = 0; Node < _disc.nParNode[parType]; Node++) {
-		//			stateDer[Cell * strideCell + Node * strideNode]
-		//				-= _disc.parInvMM[parType](Node, 0) * (state[Cell * strideCell]
-		//					- _disc.surfaceFluxParticle[parType][Cell])
-		//				- _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-		//					- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
-		//		}
-		//	}
-		//}
 	}
 
 	/**
@@ -1218,7 +1243,7 @@ protected:
 		// =================================================================//
 		// solve auxiliary systems g = d c / d xi					        //
 		// =================================================================//
-
+		
 		// reset surface flux storage as it is used multiple times
 		_disc.surfaceFluxParticle[parType].setZero();
 		// reset auxiliary g
@@ -1287,9 +1312,9 @@ protected:
 	typedef Eigen::Triplet<double> T;
 
 	/**
-	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the nodal DG scheme
+	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the inexact integration DG scheme
 	*/
-	int ConvDispNodalPattern(std::vector<T>& tripletList) {
+	int ConvDispInexactIntPattern(std::vector<T>& tripletList) {
 
 		Indexer idxr(_disc);
 
@@ -1402,7 +1427,7 @@ protected:
 	/**
 	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the exact integration DG scheme
 	*/
-	int ConvDispModalPattern(std::vector<T>& tripletList) {
+	int ConvDispExactIntPattern(std::vector<T>& tripletList) {
 
 		Indexer idxr(_disc);
 
@@ -1560,9 +1585,9 @@ protected:
 
 
 	/**
-	 * @brief calculates the particle dispersion jacobian Pattern of the nodal DG scheme for one particle type and bead
+	 * @brief calculates the particle dispersion jacobian Pattern of the exact/inexact integration DG scheme for one particle type and bead
 	*/
-	void calcNodalParticleJacobianPattern(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode, unsigned int secIdx) {
+	void calcParticleJacobianPattern(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode, unsigned int secIdx) {
 
 		Indexer idxr(_disc);
 
@@ -1580,7 +1605,7 @@ protected:
 		//// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
 		//active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 
-		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
+		// case: one cell (alwyas for exact integration) -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
@@ -1791,9 +1816,9 @@ protected:
 		tripletList.reserve(2u * calcConvDispNNZ());
 
 		if (_disc.exactInt)
-			ConvDispModalPattern(tripletList);
+			ConvDispExactIntPattern(tripletList);
 		else
-			ConvDispNodalPattern(tripletList);
+			ConvDispInexactIntPattern(tripletList);
 
 	}
 
@@ -1846,10 +1871,7 @@ protected:
 
 	void setParJacPattern(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode, unsigned int secIdx) {
 
-		if (!_disc.parExactInt[parType])
-			calcNodalParticleJacobianPattern(tripletList, parType, colNode, secIdx);
-		//else // @TODO?
-			//calcModalParticleJacobianPattern(parType, tripletList, mat);
+		calcParticleJacobianPattern(tripletList, parType, colNode, secIdx);
 
 		parTimeDerJacPattern_GRM(tripletList, parType, colNode);
 
@@ -1858,9 +1880,9 @@ protected:
 	}
 
 	/**
-	 * @brief analytically calculates the particle dispersion jacobian of the nodal DG scheme for one particle type and bead
+	 * @brief analytically calculates the particle dispersion jacobian of the exact/inexact integration DG scheme for one particle type and bead
 	*/
-	int calcNodalParticleJacobian(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
+	int calcParticleJacobian(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
 
 		Indexer idxr(_disc);
 
@@ -1881,27 +1903,44 @@ protected:
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
 
-			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
-				dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
+			if (_disc.parExactInt[parType]) {
+				// B (lifting) matrix depends on metrics
+				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
+					B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
+					dispBlock = invMap * invMap * (_disc.parPolyDerM[parType] - _disc.parInvMM[parType] * B) * _disc.parPolyDerM[parType];
+				}
+				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioCylinder) {
+					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 2.0;
+					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
+				}
+				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSphere) {
+					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 4.0;
+					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
+				}
+			}
+			else {
+				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
+					dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
 
-			else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
+				else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
 
-				dispBlock = MatrixXd::Zero(nNodes, nNodes);
+					dispBlock = MatrixXd::Zero(nNodes, nNodes);
 
-				// reduced system
-				dispBlock.block(1, 0, nNodes - 1, nNodes)
-					= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
-						- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
-					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+					// reduced system
+					dispBlock.block(1, 0, nNodes - 1, nNodes)
+						= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
+							- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
+						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-				// inner boundary node
-				dispBlock.block(0, 0, 1, nNodes)
-					= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
-						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
-							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
-					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+					// inner boundary node
+					dispBlock.block(0, 0, 1, nNodes)
+						= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
+							_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
+								_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
+						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-				dispBlock *= invMap * invMap;
+					dispBlock *= invMap * invMap;
+				}
 			}
 
 			// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
@@ -2197,27 +2236,44 @@ protected:
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
 
-			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
-				dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
+			if (_disc.parExactInt[parType]) {
+				// B (lifting) matrix depends on metrics
+				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
+					B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
+					dispBlock = invMap * invMap * (_disc.parPolyDerM[parType] - _disc.parInvMM[parType] * B) * _disc.parPolyDerM[parType];
+				}
+				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioCylinder) {
+					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 2.0;
+					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
+				}
+				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSphere) {
+					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 4.0;
+					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
+				}
+			}
+			else {
+				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
+					dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
 
-			else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
+				else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
 
-				dispBlock = MatrixXd::Zero(nNodes, nNodes);
+					dispBlock = MatrixXd::Zero(nNodes, nNodes);
 
-				// reduced system
-				dispBlock.block(1, 0, nNodes - 1, nNodes)
-					= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
-						- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
-					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+					// reduced system
+					dispBlock.block(1, 0, nNodes - 1, nNodes)
+						= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
+							- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
+						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-				// inner boundary node
-				dispBlock.block(0, 0, 1, nNodes)
-					= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
-						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
-							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
-					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+					// inner boundary node
+					dispBlock.block(0, 0, 1, nNodes)
+						= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
+							_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
+								_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
+						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-				dispBlock *= invMap * invMap;
+					dispBlock *= invMap * invMap;
+				}
 			}
 
 			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
@@ -2379,9 +2435,9 @@ protected:
 	}
 
 	/**
-		* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
+		* @brief analytically calculates the convection dispersion jacobian for the inexact integration DG scheme
 		*/
-	int calcConvDispNodalJacobian() {
+	int calcConvDispInexactIntJacobian() {
 
 		Indexer idxr(_disc);
 
@@ -2850,7 +2906,7 @@ protected:
 	/**
 		* @brief analytically calculates the convection dispersion jacobian for the exact integration DG scheme
 		*/
-	int calcConvDispModalJacobian() {
+	int calcConvDispExactIntJacobian() {
 
 		Indexer idxr(_disc);
 
@@ -3064,9 +3120,9 @@ protected:
 
 		// DG convection dispersion Jacobian for bulk
 		if (_disc.exactInt)
-			calcConvDispModalJacobian();
+			calcConvDispExactIntJacobian();
 		else
-			calcConvDispNodalJacobian();
+			calcConvDispInexactIntJacobian();
 
 		if (!_globalJac.isCompressed()) // if matrix lost its compressed storage, the predefined pattern did not fit.
 			return 0;
@@ -3081,11 +3137,7 @@ protected:
 	int calcStaticAnaParticleDispJacobian(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
 
 		// DG particle dispersion Jacobian
-		if (_disc.parExactInt[parType])
-			throw std::invalid_argument("exact integration Particle Jacobian not implemented yet");
-		//calcModalParticleJacobian(parType, _jacP[parType * colNode]);
-		else
-			calcNodalParticleJacobian(parType, colNode, parDiff, parSurfDiff, invBetaP);
+		calcParticleJacobian(parType, colNode, parDiff, parSurfDiff, invBetaP);
 
 		return _globalJac.isCompressed(); // if matrix lost its compressed storage, the calculation did not fit the pre-defined pattern.
 	}
@@ -3137,31 +3189,40 @@ protected:
 					// row: add bulk offset, jump over previous nodes and components
 					// col: add flux offset to current parType, jump over previous nodes and components
 					tripletList.push_back(T(idxr.offsetC() + colNode * idxr.strideColNode() + comp * idxr.strideColComp(),
-						idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
+											idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
 					// add F on Cl entries
 					// row: add flux offset to current parType, jump over previous nodes and components
 					// col: add bulk offset, jump over previous nodes and components
 					tripletList.push_back(T(idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp,
-						idxr.offsetC() + colNode * idxr.strideColNode() + comp * idxr.strideColComp(), 0.0));
+											idxr.offsetC() + colNode * idxr.strideColNode() + comp * idxr.strideColComp(), 0.0));
 					// add Cp on F entries
-					// row: add particle offset to current parType, jump over previous particles, go to last node and add component offset
-					// col: add flux offset to current component, jump over previous nodes and components
-					tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
-						+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(),
-						idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
-
+					if(!_disc.parExactInt[type])
+						// row: add particle offset to current parType, jump over previous particles, go to last node and add component offset
+						// col: add flux offset to current component, jump over previous nodes and components
+						tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
+												+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(),
+												idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
+					else {
+						for (unsigned int node = 0; node < _disc.nParNode[type]; node++) {
+							// row: add particle offset to current parType, jump over previous particles, go to current node and add component offset
+							// col: add flux offset to current component, jump over previous nodes and components
+							tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
+													+ node * idxr.strideParShell(type) + comp * idxr.strideParComp(),
+													idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
+						}
+					}
 					// add F on Cp entries
 					// row: add flux offset to current parType, jump over previous nodes and components
 					// col: add particle offset to current parType, jump over previous particles and components
 					tripletList.push_back(T(idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp,
-						idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
-						+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(), 0.0));
+											idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
+											+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(), 0.0));
 
 					// add F on F entries (identity matrix)
 					// row: add flux offset to current parType, jump over previous nodes and components
 					// col: add flux offset to current parType, jump over previous nodes and components
 					tripletList.push_back(T(idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp,
-						idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
+											idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
 				}
 			}
 		}
@@ -3176,6 +3237,11 @@ protected:
 		Indexer idxr(_disc);
 
 		for (unsigned int type = 0; type < _disc.nParType; type++) {
+
+			// estimate particle geometry dependent lifting matrix contribution (only required for exact integration scheme)
+			double liftContribution = 4.0;
+			if (_parGeomSurfToVol[type] != _disc.SurfVolRatioSphere)
+				liftContribution = _parGeomSurfToVol[type] == _disc.SurfVolRatioCylinder ? 2.0 : 1.0;
 
 			// Ordering of diffusion:
 			// sec0type0comp0, sec0type0comp1, sec0type0comp2, sec0type1comp0, sec0type1comp1, sec0type1comp2,
@@ -3205,10 +3271,22 @@ protected:
 					jacFCl[-idxr.offsetJf(ParticleTypeIndex{ type }) + idxr.offsetC()] = -static_cast<double>(filmDiff[comp]);
 
 					// add Cp on F entries (inexact integration scheme)
-					// row: already at particle. already at current node and liquid state.
-					// col: go to flux of current parType. jump over previous colNodes and add component offset
-					jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
-						= -2.0 / _disc.deltaR[type] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+					if (!_disc.parExactInt[type]) {
+						// row: already at particle. already at current node and liquid state.
+						// col: go to flux of current parType. jump over previous colNodes and add component offset
+						jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
+							= -2.0 / _disc.deltaR[type] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+					}
+					else {
+						for (unsigned int node = 0; node < _disc.nParNode[type]; node++, jacCpF -= idxr.strideParShell(type)) {
+							// row: already at particle. Already at current node and liquid state.
+							// col: go to flux of current parType. jump over previous colNodes and add component offset
+							jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
+								= liftContribution * (-2.0 / _disc.deltaR[type] * _disc.parInvMM[type](node, 0) / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]));
+						}
+						// set back iterator to first node as required by component loop
+						jacCpF += _disc.nParNode[type] * idxr.strideParShell(type);
+					}
 
 					// add F on Cp entries
 					// row: already at flux of current parType. already at current node and component.

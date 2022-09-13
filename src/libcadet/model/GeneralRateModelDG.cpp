@@ -153,7 +153,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 
 	const std::vector<int> nParCell = paramProvider.getIntArray("NPARCELL");
 	const std::vector<int> parPolyDeg = paramProvider.getIntArray("PARPOLYDEG");
-	const std::vector<bool> parModal = paramProvider.getBoolArray("PAR_EXACT_INTEGRATION");
+	const std::vector<bool> parExactInt = paramProvider.getBoolArray("PAR_EXACT_INTEGRATION");
 
 	const std::vector<int> nBound = paramProvider.getIntArray("NBOUND");
 	if (nBound.size() < _disc.nComp)
@@ -164,10 +164,10 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	else
 	{
 		// Infer number of particle types
-		_disc.nParType = std::max({ nBound.size() / _disc.nComp, nParCell.size(), parPolyDeg.size(), parModal.size() });
+		_disc.nParType = std::max({ nBound.size() / _disc.nComp, nParCell.size(), parPolyDeg.size(), parExactInt.size() });
 	}
 
-	if ((parModal.size() > 1) && (parModal.size() < _disc.nParType))
+	if ((parExactInt.size() > 1) && (parExactInt.size() < _disc.nParType))
 		throw InvalidParameterException("Field PAR_EXACT_INTEGRATION must have 1 or NPARTYPE (" + std::to_string(_disc.nParType) + ") entries");
 	if ((nParCell.size() > 1) && (nParCell.size() < _disc.nParType))
 		throw InvalidParameterException("Field NPARCELL must have 1 or NPARTYPE (" + std::to_string(_disc.nParType) + ") entries");
@@ -208,14 +208,14 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	}
 
 	_disc.parExactInt = new bool[_disc.nParType];
-	if (parModal.size() < _disc.nParType)
+	if (parExactInt.size() < _disc.nParType)
 	{
 		// Multiplex exact/inexact integration of particle elements to all particle types
 		for (unsigned int i = 0; i < _disc.nParType; ++i)
-			std::fill(_disc.parExactInt, _disc.parExactInt + _disc.nParType, parModal[0]);
+			std::fill(_disc.parExactInt, _disc.parExactInt + _disc.nParType, parExactInt[0]);
 	}
 	else
-		std::copy_n(parModal.begin(), _disc.nParType, _disc.parExactInt);
+		std::copy_n(parExactInt.begin(), _disc.nParType, _disc.parExactInt);
 
 	if ((nBound.size() > _disc.nComp) && (nBound.size() < _disc.nComp * _disc.nParType))
 		throw InvalidParameterException("Field NBOUND must have NCOMP (" + std::to_string(_disc.nComp) + ") or NCOMP * NPARTYPE (" + std::to_string(_disc.nComp * _disc.nParType) + ") entries");
@@ -583,7 +583,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	_globalJac.resize(numDofs(), numDofs());
 	setJacobianPattern_GRM(_globalJac, 0);
 	//setJacobianPattern_GRM(_globalJacDisc); // not necessary as _globalJacDisc will be copied from _globalJac
-	FDJac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete
+	//FDJac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete
 
 	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
 	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
@@ -653,6 +653,16 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 		throw InvalidParameterException("Number of elements in field PAR_POROSITY does not match number of particle types");
 	if (_disc.nParType != _parCoreRadius.size())
 		throw InvalidParameterException("Number of elements in field PAR_CORERADIUS does not match number of particle types");
+
+	// check wether configuration fits discretization method
+	for (int parType = 0; parType < _disc.nParType; parType++) {
+		if (_disc.parExactInt[parType]) {
+			if (_parCoreRadius[parType] != 0.0 && _parGeomSurfToVol[parType] != SurfVolRatioSlab)
+				throw InvalidParameterException("Exact integration inside particles does not allow particle cores for spherical and cylindrical particles. Use inexact integration approach instead.");
+			if (_disc.nParCell[parType] != 1)
+				throw InvalidParameterException("Exact integration inside particles can only employ one particle element, you chose " + std::to_string(_disc.nParCell[parType]));
+		}
+	}
 
 	// Check that particle volume fractions sum to 1.0
 	for (unsigned int i = 0; i < _disc.nPoints; ++i)
@@ -1312,7 +1322,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
 	// special case: individual treatment of time derivatives in particle mass balance at inner particle boundary node
-	bool specialCase = (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0);
+	bool specialCase = !_disc.parExactInt[parType] && (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0);
 
 	// Prepare parameters
 	active const* const parDiff = getSectionDependentSlice(_parDiffusion, _disc.nComp * _disc.nParType, secIdx) + parType * _disc.nComp;
@@ -2198,8 +2208,8 @@ void GeneralRateModelDG::updateRadialDisc()
 			//setUserdefinedRadialDisc(i);
 	}
 
-	/*		metrics		*/ // TODO different cell spacings
-	// estimate cell dependent D_r
+	/*		metrics		*/
+	// estimate cell dependent D_r // TODO? allow for equivolume and user-defined cell spacings?
 
 	for (int parType = 0; parType < _disc.nParType; parType++) {
 
@@ -2228,6 +2238,17 @@ void GeneralRateModelDG::updateRadialDisc()
 			_disc.Dr[_disc.offsetMetric[parType] + cell].array().rowwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().transpose();
 			_disc.Dr[_disc.offsetMetric[parType] + cell].array().colwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().cwiseInverse();
 
+			// compute mass matrices for exact integration based on particle geometry, via transformation to normalized Jacobi polynomials with weight function w
+			if (_parGeomSurfToVol[parType] == SurfVolRatioSphere) { // w = (1 + \xi)^2
+				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 2.0);
+				_disc.minus_InvMM_ST[parType] = - _disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+			}
+			if (_parGeomSurfToVol[parType] == SurfVolRatioCylinder) { // w = (1 + \xi)
+				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 1.0);
+				_disc.minus_InvMM_ST[parType] = -_disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+			}
+			if (_parGeomSurfToVol[parType] == SurfVolRatioSlab) // w = 1
+				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0);
 		}
 	}
 
