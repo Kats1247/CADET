@@ -654,16 +654,6 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 	if (_disc.nParType != _parCoreRadius.size())
 		throw InvalidParameterException("Number of elements in field PAR_CORERADIUS does not match number of particle types");
 
-	// check wether configuration fits discretization method
-	for (int parType = 0; parType < _disc.nParType; parType++) {
-		if (_disc.parExactInt[parType]) {
-			if (_parCoreRadius[parType] != 0.0 && _parGeomSurfToVol[parType] != SurfVolRatioSlab)
-				throw InvalidParameterException("Exact integration inside particles does not allow particle cores for spherical and cylindrical particles. Use inexact integration approach instead.");
-			if (_disc.nParCell[parType] != 1)
-				throw InvalidParameterException("Exact integration inside particles can only employ one particle element, you chose " + std::to_string(_disc.nParCell[parType]));
-		}
-	}
-
 	// Check that particle volume fractions sum to 1.0
 	for (unsigned int i = 0; i < _disc.nPoints; ++i)
 	{
@@ -1180,7 +1170,7 @@ int GeneralRateModelDG::residual(const SimulationTime& simTime, const ConstSimul
 template <typename StateType, typename ResidualType, typename ParamType, bool wantJac>
 int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType const* const y, double const* const yDot, ResidualType* const res, util::ThreadLocalStorage& threadLocalMem)
 {
-
+	
 	// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac
 	updateSection(secIdx);
 
@@ -1215,11 +1205,11 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 	}
 
 	// we need to add the DG discretized solid entries of the jacobian that get overwritten by the binding kernel.
-	// These entries only exist for surface diffusion combined with kinetic binding.
+	// These entries only exist for the GRM with surface diffusion
 	// todo component specific
 	if (wantJac) {
 		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
-			if (!_binding[parType]->reactionQuasiStationarity() && _hasSurfaceDiffusion[parType]) {
+			if (_binding[parType]->hasDynamicReactions() && _hasSurfaceDiffusion[parType]) {
 				active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 				addSolidDGentries(parType, _parSurfDiff);
 			}
@@ -2233,22 +2223,35 @@ void GeneralRateModelDG::updateRadialDisc()
 			else if (_parGeomSurfToVol[parType] == SurfVolRatioSlab)
 				_disc.Ir[_disc.offsetMetric[parType] + cell] = VectorXd::Ones(_disc.nParNode[parType]); // no metrics for slab
 
-			// (D_r)_{i, j} = D_{i, j} * (r_j / r_i)
+			// (D_r)_{i, j} = D_{i, j} * (r_j / r_i) [only needed for inexact integration]
 			_disc.Dr[_disc.offsetMetric[parType] + cell] = _disc.parPolyDerM[parType];
 			_disc.Dr[_disc.offsetMetric[parType] + cell].array().rowwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().transpose();
 			_disc.Dr[_disc.offsetMetric[parType] + cell].array().colwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().cwiseInverse();
 
 			// compute mass matrices for exact integration based on particle geometry, via transformation to normalized Jacobi polynomials with weight function w
 			if (_parGeomSurfToVol[parType] == SurfVolRatioSphere) { // w = (1 + \xi)^2
-				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 2.0);
-				_disc.minus_InvMM_ST[parType] = - _disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+
+				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 2.0).inverse() * pow((_disc.deltaR[parType] / 2.0), 2.0);
+				if(cell > 0 || _parCoreRadius[parType] != 0.0) // following contributions are zero for first cell when R_c = 0 (no particle core)
+					_disc.parInvMM[_disc.offsetMetric[parType] + cell] += _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 1.0).inverse() * (_disc.deltaR[parType] * r_L)
+																	   + _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0).inverse() * pow(r_L, 2.0);
+
+				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
+				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = - _disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
 			}
-			if (_parGeomSurfToVol[parType] == SurfVolRatioCylinder) { // w = (1 + \xi)
-				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 1.0);
-				_disc.minus_InvMM_ST[parType] = -_disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+			else if (_parGeomSurfToVol[parType] == SurfVolRatioCylinder) { // w = (1 + \xi)
+
+				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 1.0).inverse() * (_disc.deltaR[parType] / 2.0);
+				if (cell > 0 || _parCoreRadius[parType] != 0.0) // following contribution is zero for first cell when R_c = 0 (no particle core)
+					_disc.parInvMM[_disc.offsetMetric[parType] + cell] += _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0).inverse() * r_L;
+
+				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
+				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = -_disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
 			}
-			if (_parGeomSurfToVol[parType] == SurfVolRatioSlab) // w = 1
-				_disc.parInvMM[parType] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0);
+			else if (_parGeomSurfToVol[parType] == SurfVolRatioSlab) { // w = 1
+
+				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0);
+			}
 		}
 	}
 
