@@ -117,6 +117,8 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	paramProvider.pushScope("discretization");
 
 	_disc.nCol = paramProvider.getInt("NCOL");
+	if (_disc.nCol < 1)
+		throw InvalidParameterException("Number of column cells must be at least 1!");
 
 	_disc.polyDeg = paramProvider.getInt("POLYDEG");
 	if (_disc.polyDeg < 1)
