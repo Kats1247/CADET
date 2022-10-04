@@ -144,6 +144,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	paramProvider.pushScope("discretization");
 
 	_disc.nCol = paramProvider.getInt("NCOL");
+	if (_disc.nCol < 1)
+		throw InvalidParameterException("Number of column cells must be at least 1!");
 
 	_disc.polyDeg = paramProvider.getInt("POLYDEG");
 	if (_disc.polyDeg < 1)
@@ -202,6 +204,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 		{
 			if (parPolyDeg[parType] < 1)
 				throw InvalidParameterException("Particle polynomial degree(s) must be at least 1!");
+			if (_disc.nParCell[parType] < 1)
+				throw InvalidParameterException("Number of particle cell(s) must be at least 1!");
 
 			_disc.parPolyDeg[parType] = parPolyDeg[parType];
 		}
