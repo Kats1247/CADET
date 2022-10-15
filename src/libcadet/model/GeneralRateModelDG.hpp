@@ -299,7 +299,7 @@ protected:
 		//// NOTE: no different Riemann solvers or boundary conditions
 
 		double deltaZ; //!< equidistant column spacing
-		double* deltaR; //!< equidistant particle radial spacing for each particle type
+		double* deltaR; //!< equidistant particle element spacing for each particle type
 		Eigen::VectorXd nodes; //!< Array with positions of nodes in reference element
 		Eigen::MatrixXd polyDerM; //!< Array with polynomial derivative Matrix
 		Eigen::VectorXd invWeights; //!< Array with weights for numerical quadrature of size nNodes
@@ -1138,7 +1138,7 @@ protected:
 							-= _disc.parInvMM_Leg[parType](Node, 0) * (state[Cell * strideCell]
 								- _disc.surfaceFluxParticle[parType][Cell])
 							- _disc.parInvMM_Leg[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-								- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
+								- _disc.surfaceFluxParticle[parType][Cell + 1u]);
 					}
 					else {
 						if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) { // strong surface integral -> M^-1 B [state - state*] and B has two non-zero entries, -1 and 1
@@ -1146,17 +1146,17 @@ protected:
 								-= _disc.parInvMM[parType](Node, 0) * (state[Cell * strideCell]
 									- _disc.surfaceFluxParticle[parType][Cell])
 								- _disc.parInvMM[parType](Node, _disc.parPolyDeg[parType]) * (state[Cell * strideCell + _disc.parPolyDeg[parType] * strideNode]
-									- _disc.surfaceFluxParticle[parType][(Cell + 1u)]);
+									- _disc.surfaceFluxParticle[parType][Cell + 1u]);
 						}
 						else if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioCylinder) { // weak surface integral -> M^-1 B [- state*] and B has two non-zero entries, which depend on metrics
 							stateDer[Cell * strideCell + Node * strideNode]
 								-= _disc.Ir[_disc.offsetMetric[parType] + Cell][0] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, 0) * (-_disc.surfaceFluxParticle[parType][Cell])
-								+ _disc.Ir[_disc.offsetMetric[parType] + Cell][_disc.nParNode[parType] - 1] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][(Cell + 1u)];
+								+ _disc.Ir[_disc.offsetMetric[parType] + Cell][_disc.nParNode[parType] - 1] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][Cell + 1u];
 						}
 						else if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSphere) { // weak surface integral -> M^-1 B [- state*] and B has two non-zero entries, which depend on metrics
 							stateDer[Cell * strideCell + Node * strideNode]
 								-= _disc.Ir[_disc.offsetMetric[parType] + Cell][0] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, 0) * (-_disc.surfaceFluxParticle[parType][Cell])
-								+ _disc.Ir[_disc.offsetMetric[parType] + Cell][_disc.nParNode[parType] - 1] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][(Cell + 1u)];
+								+ _disc.Ir[_disc.offsetMetric[parType] + Cell][_disc.nParNode[parType] - 1] * _disc.parInvMM[_disc.offsetMetric[parType] + Cell](Node, _disc.parPolyDeg[parType]) * _disc.surfaceFluxParticle[parType][Cell + 1u];
 						}
 					}
 				}
@@ -2698,15 +2698,12 @@ protected:
 			if (_disc.parExactInt[parType]) {
 				// B (lifting) matrix depends on metrics
 				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
-					B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
 					dispBlock = invMap * invMap * (_disc.parPolyDerM[parType] - _disc.parInvMM[parType] * B) * _disc.parPolyDerM[parType];
 				}
 				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioCylinder) {
-					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 2.0;
 					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
 				}
 				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSphere) {
-					B(0, 0) = 0.0; B(nNodes - 1, nNodes - 1) = 4.0;
 					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
 				}
 			}
@@ -2752,6 +2749,7 @@ protected:
 		}
 		else {
 
+			// @TODO exact integration!
 			/*			boundary cells			*/
 			// initialize dispersion and metric block matrices
 			MatrixXd bnd_dispBlock = MatrixXd::Zero(nNodes, 2 * nNodes); // boundary cell specific
@@ -3192,8 +3190,14 @@ protected:
 
 		//  indices  dispBlock :   0	 ,   1   , ..., nNodes;	nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
 		//	derivative index j  : -(N+1)-1, -(N+1),...,	 -1	  ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-		dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
+			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
+			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
+		}
 		dispBlock *= 2 / _disc.deltaR[parType];
 
 		return dispBlock;
@@ -3248,9 +3252,15 @@ protected:
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, cell);
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-		dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
+			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
+			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
+		}
 		dispBlock *= 2 / _disc.deltaR[parType];
 
 		return dispBlock;
@@ -3305,9 +3315,15 @@ protected:
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, cell);
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-		dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
+			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
+			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
+		}
 		dispBlock *= 2 / _disc.deltaR[parType];
 
 		return dispBlock;
@@ -3358,16 +3374,18 @@ protected:
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, cell);
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
-		dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
-		dispBlock *= 2 / _disc.deltaR[parType];
+		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 
-		//std::cout << std::fixed << std::setprecision(3) << "surfIntContr\n" << _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC * 2 / _disc.deltaR[parType] << std::endl;
-//std::cout << "Bblock\n" << getParBMatrix(nNodes, parType, cell) << std::endl;
-//std::cout << "gStarDC\n" << gStarDC << std::endl;
-//std::cout << "G_r\n" << GBlockBound_r << std::endl;
-//std::cout << "invMM\n" << _disc.parInvMM[_disc.offsetMetric[parType] + cell] << std::endl;
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
+			dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_l - _disc.parInvMM[parType] * B * GBlockBound_l;
+			dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[parType] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
+		}
+
+		dispBlock *= 2 / _disc.deltaR[parType];
 
 
 		return dispBlock;
@@ -3418,9 +3436,15 @@ protected:
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
-		dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
+			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[parType] * B * GBlockBound_r;
+			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
+		}
 		dispBlock *= 2 / _disc.deltaR[parType];
 
 		return dispBlock;
@@ -3532,13 +3556,21 @@ protected:
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 			gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
 			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			// Korrektur
-			//gStarDC.block(0, nNodes + nNodes, 1, 1) += gStarDC.block(0, nNodes + nNodes + 1, 1, 1);
+			
+			gStarDC.block(0, nNodes + nNodes, 1, 1) += gStarDC.block(0, nNodes + nNodes + 1, 1, 1);// Korrektur
 
 			gStarDC *= 0.5;
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[parType];
+
+			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
+				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
+				dispBlock *= 2 / _disc.deltaR[parType];
+			}
+			else {
+				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * GBlockBound_r;
+				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
+				dispBlock *= 2 / _disc.deltaR[parType];
+			}
 
 			//std::cout << std::fixed << std::setprecision(3) << "surfIntContr\n" << _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC * 2 / _disc.deltaR[parType] << std::endl;
 			//std::cout << "Bblock\n" << getParBMatrix(nNodes, parType, cell) << std::endl;
@@ -3554,13 +3586,21 @@ protected:
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			// Korrektur
-			//gStarDC.block(nNodes - 1, nNodes + 1, 1, 1) += gStarDC.block(nNodes - 1, nNodes, 1, 1);
+			
+			gStarDC.block(nNodes - 1, nNodes + 1, 1, 1) += gStarDC.block(nNodes - 1, nNodes, 1, 1);// Korrektur
 
 			gStarDC *= 0.5;
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[parType];
+
+			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
+				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
+				dispBlock *= 2 / _disc.deltaR[parType];
+			}
+			else {
+				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_l - _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * GBlockBound_l;
+				dispBlock += _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * gStarDC;
+				dispBlock *= 2 / _disc.deltaR[parType];
+			}
 
 			return dispBlock;
 		}
@@ -3628,11 +3668,17 @@ protected:
 		gStarDC *= 0.5;
 
 		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + 1] * gBlock;
-		dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + 1] * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaR[parType];
-
+		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + 1] * gBlock;
+			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + 1] * B * gStarDC;
+			dispBlock *= 2 / _disc.deltaR[parType];
+		}
+		else {
+			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
+			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
+			dispBlock *= 2 / _disc.deltaR[parType];
+		}
 		return dispBlock;
 	}
 
