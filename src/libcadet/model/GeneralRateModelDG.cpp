@@ -2241,7 +2241,7 @@ void GeneralRateModelDG::updateRadialDisc()
 																	   + _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0).inverse() * pow(r_L, 2.0);
 
 				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
-				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = - _disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = - _disc.parInvMM[_disc.offsetMetric[parType] + cell] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
 			}
 			else if (_parGeomSurfToVol[parType] == SurfVolRatioCylinder) { // w = (1 + \xi)
 
@@ -2250,7 +2250,7 @@ void GeneralRateModelDG::updateRadialDisc()
 					_disc.parInvMM[_disc.offsetMetric[parType] + cell] += _disc.invMMatrix(_disc.nParNode[parType], _disc.parNodes[parType], 0.0, 0.0).inverse() * r_L;
 
 				_disc.parInvMM[_disc.offsetMetric[parType] + cell] = _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
-				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = -_disc.parInvMM[parType] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[parType].inverse();
+				_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] = -_disc.parInvMM[_disc.offsetMetric[parType] + cell] * _disc.parPolyDerM[parType].transpose() * _disc.parInvMM[_disc.offsetMetric[parType] + cell].inverse();
 			}
 			else if (_parGeomSurfToVol[parType] == SurfVolRatioSlab) { // w = 1
 
