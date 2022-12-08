@@ -471,6 +471,7 @@ protected:
 	Eigen::SparseMatrix<double, RowMajor> _jac; //!< Jacobian
 	Eigen::SparseMatrix<double, RowMajor> _jacDisc; //!< Jacobian with time derivatives from BDF method
 	Eigen::MatrixXd _jacInlet; //!< Jacobian inlet DOF block matrix connects inlet DOFs to first bulk cells
+	MatrixXd FDjac; // todo delete!
 
 	active _totalPorosity; //!< Total porosity \f$ \varepsilon_t \f$
 
@@ -740,7 +741,7 @@ protected:
 		unsigned int strideCell = _disc.nNodes;
 		unsigned int strideNode = 1u;
 
-		// calc numerical flux values c* or h* depending on equation switch aux
+		// calc numerical flux values c* or h* depending on auxiliary equation switch aux
 		(aux == 1) ? InterfaceFluxAuxiliary(C) : InterfaceFlux(C, _disc.g, Comp);
 		if (_disc.exactInt) { // modal approach -> dense mass matrix
 			for (unsigned int Cell = 0; Cell < _disc.nCol; Cell++) {
@@ -1654,7 +1655,7 @@ protected:
 
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
+			gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
 			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC *= 0.5;
 			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
@@ -1669,7 +1670,7 @@ protected:
 
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
+			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
 			gStarDC *= 0.5;
 			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
@@ -1802,10 +1803,9 @@ protected:
 			// left boundary cell
 
 			dispBlock = leftBndryCellBlock();
-			unsigned int special = 0u; if (nCells == 3u) special = 1u; // limits the iterator for special case nCells = 3
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = nNodes + 1; j < dispBlock.cols() - special; j++) {
+					for (unsigned int j = nNodes + 1; j < dispBlock.cols(); j++) {
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
 						_jac.coeffRef(offC + comp * sComp + i * sNode,
@@ -1821,7 +1821,7 @@ protected:
 
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = special; j < 2 * nNodes + 1; j++) {
+					for (unsigned int j = 0; j < 2 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for relevant dispersion block entries.
 						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
@@ -2003,6 +2003,53 @@ protected:
 
 	}
 
+	// testing purpose
+	MatrixXd calcFDJacobian(const SimulationTime simTime, util::ThreadLocalStorage& threadLocalMem, double alpha) {
+
+		// create solution vectors
+		VectorXd y = VectorXd::Zero(numDofs());
+		VectorXd yDot = VectorXd::Zero(numDofs());
+		VectorXd res = VectorXd::Zero(numDofs());
+		const double* yPtr = &y[0];
+		const double* yDotPtr = &yDot[0];
+		double* resPtr = &res[0];
+		// create FD jacobian
+		MatrixXd Jacobian = MatrixXd::Zero(numDofs(), numDofs());
+		// set FD step
+		double epsilon = 0.01;
+
+		residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+
+		for (int col = 0; col < Jacobian.cols(); col++) {
+			Jacobian.col(col) = -(1.0 + alpha) * res;
+		}
+		/*	 Residual(y+h)	*/
+		// state DOFs
+		for (int dof = 0; dof < Jacobian.cols(); dof++) {
+			y[dof] += epsilon;
+			residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+			y[dof] -= epsilon;
+			Jacobian.col(dof) += res;
+		}
+
+		// state derivative Jacobian
+		for (int dof = 0; dof < Jacobian.cols(); dof++) {
+			yDot[dof] += epsilon;
+			residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+			yDot[dof] -= epsilon;
+			Jacobian.col(dof) += alpha * res;
+		}
+
+		///*	exterminate numerical noise	and divide by epsilon*/
+		//for (int i = 0; i < Jacobian.rows(); i++) {
+		//	for (int j = 0; j < Jacobian.cols(); j++) {
+		//		if (std::abs(Jacobian(i, j)) < 1e-10) Jacobian(i, j) = 0.0;
+		//	}
+		//}
+		Jacobian /= epsilon;
+
+		return Jacobian;
+	}
 };
 
 } // namespace model
