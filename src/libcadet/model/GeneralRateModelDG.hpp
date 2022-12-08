@@ -12,9 +12,12 @@
 //TODO: delete iostream, iomanip
 #include <iostream>
 #include <iomanip>      // std::setprecision
+
 /**
  * @file 
  * Defines the general rate model (GRM).
+ * TODO / work inprogess:
+   1) AD, 2) parameter sensitivities, 3) reactions
  */
 
 #ifndef LIBCADET_GENERALRATEMODELDG_HPP_
@@ -242,13 +245,12 @@ protected:
 	int residualFlux(double t, unsigned int secIdx, StateType const* y, double const* yDot, ResidualType* res);
 
 	void assembleOffdiagJac(double t, unsigned int secIdx, double const* vecStateY);
-	//void assembleOffdiagJacFluxParticle(double t, unsigned int secIdx, double const* vecStateY); // TODO delete
 	void extractJacobianFromAD(active const* const adRes, unsigned int adDirOffset);
 
 	void assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr);
 
 	void setEquidistantRadialDisc(unsigned int parType);
-	//@TODO? allow different cell spacing for DG
+	//@TODO allow different cell spacing for DG
 	void setEquivolumeRadialDisc(unsigned int parType);
 	void setUserdefinedRadialDisc(unsigned int parType);
 	void updateRadialDisc();
@@ -318,7 +320,6 @@ protected:
 		Eigen::VectorXd dispersion; //!< Column dispersion (may be section and component dependent)
 		bool _dispersionCompIndep; //!< Determines whether dispersion is component independent
 		double velocity; //!< Interstitial velocity (may be section dependent) \f$ u \f$
-		double curVelocity;
 		double crossSection; //!< Cross section area 
 		int curSection; //!< current time section index
 
@@ -617,7 +618,6 @@ protected:
 	std::vector<bool> _hasSurfaceDiffusion; //!< Determines whether surface diffusion is present in each particle type
 //	IExternalFunction* _extFun; //!< External function (owned by library user)
 
-	parts::ConvectionDispersionOperator _convDispOp; //!< Convection dispersion operator for interstitial volume transport
 	parts::ConvectionDispersionOperatorBase _convDispOpB; //!< Convection dispersion operator (base) for interstitial volume transport
 	IDynamicReactionModel* _dynReactionBulk; //!< Dynamic reactions in the bulk volume
 
@@ -664,13 +664,8 @@ protected:
 	std::vector<active> _parOuterSurfAreaPerVolume; //!< Particle shell outer sphere surface to volume ratio
 	std::vector<active> _parInnerSurfAreaPerVolume; //!< Particle shell inner sphere surface to volume ratio
 
-	ArrayPool _discParFlux; //!< Storage for discretized @f$ k_f @f$ value //TODO delete
-
 	bool _factorizeJacobian; //!< Determines whether the Jacobian needs to be factorized
 	double* _tempState; //!< Temporary storage with the size of the state vector or larger if binding models require it
-	linalg::Gmres _gmres; //!< GMRES algorithm for the Schur-complement in linearSolve() //TODO delete
-	double _schurSafety; //!< Safety factor for Schur-complement solution //TODO delete
-	int _colParBoundaryOrder; //!< Order of the bulk-particle boundary discretization //TODO delete
 
 	std::vector<active> _initC; //!< Liquid bulk phase initial conditions
 	std::vector<active> _initCp; //!< Liquid particle phase initial conditions
@@ -691,9 +686,6 @@ protected:
 	BENCH_TIMER(_timerMatVec)
 	BENCH_TIMER(_timerGmres)
 
-	// Wrapper for calling the corresponding function in GeneralRateModelDG class //TODO: delete!
-	//friend int schurComplementMultiplierGRM_DG(void* userData, double const* x, double* z);
-
 	class Indexer
 	{
 	public:
@@ -707,12 +699,11 @@ protected:
 		inline int strideParComp() const CADET_NOEXCEPT { return 1; }
 		inline int strideParLiquid() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp); }
 		inline int strideParBound(int parType) const CADET_NOEXCEPT { return static_cast<int>(_disc.strideBound[parType]); }
-		inline int strideParShell(int parType) const CADET_NOEXCEPT { return strideParLiquid() + strideParBound(parType); } // TODO: rename to strideParNode! particle shell ist eigentlich ja die elementweise schale
-		inline int strideParBlock(int parType) const CADET_NOEXCEPT { return static_cast<int>(_disc.nParPoints[parType]) * strideParShell(parType); }
+		inline int strideParNode(int parType) const CADET_NOEXCEPT { return strideParLiquid() + strideParBound(parType); }
+		//inline int stridePaShell(int parType) const CADET_NOEXCEPT { return strideParNode(parType) * _disc.nParNode[parType]; } // not needed
+		inline int strideParBlock(int parType) const CADET_NOEXCEPT { return static_cast<int>(_disc.nParPoints[parType]) * strideParNode(parType); }
 
 		inline int strideFluxNode() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp) * static_cast<int>(_disc.nParType); }
-		// @TODO: needed for non-bulk related FV implementation? else delete strideFluxCell
-		inline int strideFluxCell() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp) * static_cast<int>(_disc.nParType); }
 		inline int strideFluxParType() const CADET_NOEXCEPT { return static_cast<int>(_disc.nComp); }
 		inline int strideFluxComp() const CADET_NOEXCEPT { return 1; }
 
@@ -760,7 +751,7 @@ protected:
 		virtual bool hasVolume() const CADET_NOEXCEPT { return false; }
 
 		virtual unsigned int numComponents() const CADET_NOEXCEPT { return _disc.nComp; }
-		// @TODO ? actually we need number of axial discrete points here, not number of axial cells, so change name !
+		// @TODO rename: numAxialCells, numRadialCells, numParticleShells -> Points !
 		virtual unsigned int numAxialCells() const CADET_NOEXCEPT { return _disc.nPoints; }
 		virtual unsigned int numRadialCells() const CADET_NOEXCEPT { return 0; }
 		virtual unsigned int numInletPorts() const CADET_NOEXCEPT { return 1; }
@@ -787,7 +778,7 @@ protected:
 		virtual double const* outlet(unsigned int port, unsigned int& stride) const
 		{
 			stride = _idx.strideColComp();
-			if (_model._convDispOp.currentVelocity() >= 0)
+			if (_model._convDispOpB.currentVelocity() >= 0)
 				return &_idx.c(_data, _disc.nPoints - 1, 0);
 			else
 				return &_idx.c(_data, 0, 0);
@@ -818,8 +809,8 @@ protected:
 		}
 
 		virtual unsigned int bulkMobilePhaseStride() const { return _idx.strideColNode(); }
-		virtual unsigned int particleMobilePhaseStride(unsigned int parType) const { return _idx.strideParShell(parType); }
-		virtual unsigned int solidPhaseStride(unsigned int parType) const { return _idx.strideParShell(parType); }
+		virtual unsigned int particleMobilePhaseStride(unsigned int parType) const { return _idx.strideParNode(parType); }
+		virtual unsigned int solidPhaseStride(unsigned int parType) const { return _idx.strideParNode(parType); }
 
 		/**
 		* @brief calculates the physical axial/column coordinates of the DG discretization with double! interface nodes
@@ -869,6 +860,7 @@ protected:
 
 			// update velocity and dispersion
 			_disc.velocity = static_cast<double>(_convDispOpB.currentVelocity());
+
 			if (_convDispOpB.dispersionCompIndep())
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 					_disc.dispersion[comp] = static_cast<double>(_convDispOpB.currentDispersion(secIdx)[0]);
@@ -1093,7 +1085,6 @@ protected:
 	 * @param [in] state relevant state vector
 	 * @param [in] stateDer state derivative vector the solution is added to
 	 * @param [in] aux true for auxiliary equation, false for main equation
-		surfaceIntegral(cPtr, &(disc.g[0]), disc,&(disc.h[0]), resPtrC, 0, secIdx);
 	 * @param [in] strideCell component-wise cell stride
 	 * @param [in] strideNodecomponent-wise node stride
 	 * @param [in] comp current component
@@ -1594,21 +1585,19 @@ protected:
 	*/
 	void calcParticleJacobianPattern(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode, unsigned int secIdx) {
 
+		// Ordering of particle surface diffusion:
+		// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+		active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
+
 		Indexer idxr(_disc);
 
 		// (global) strides
-		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParShell(parType);
-		unsigned int sNode = idxr.strideParShell(parType);
+		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParNode(parType);
+		unsigned int sNode = idxr.strideParNode(parType);
 		unsigned int sComp = 1u;
 		//
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 		unsigned int nNodes = _disc.nParNode[parType];
-
-		//// @TODO some bound states mioght not have surface diffusion, even when particle enables surfDiff: _hasSurfDiff = true !
-		//unsigned int idx = 0; // index to access diffusion coefficient storage
-		//// Ordering of particle surface diffusion:
-		//// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
-		//active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 
 		// case: one cell  -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
@@ -1621,30 +1610,30 @@ protected:
 						// row: add component offset and go node strides from there for each dispersion block entry
 						// col: add component offset and go node strides from there for each dispersion block entry
 						tripletList.push_back(T(offset + comp * sComp + i * sNode,
-							offset + comp * sComp + j * sNode, 0.0));
+												offset + comp * sComp + j * sNode, 0.0));
 
 						// handle surface diffusion of bound states.
 						if (_hasSurfaceDiffusion[parType]) {
 
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
-							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) { // @TODO , idx++) {
-								// row: add current component offset and go node strides from there for each dispersion block entry
-								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-								tripletList.push_back(T(offset + comp * sComp + i * sNode,
-									offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode, 0.0));
+							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+								if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+									// row: add current component offset and go node strides from there for each dispersion block entry
+									// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+									tripletList.push_back(T(offset + comp * sComp + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode, 0.0));
 
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) { //&& static_cast<double>(_parSurfDiff[idx]) != 0.0) {// @TODO
-									// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-										offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode, 0.0));
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode, 0.0));
 
+									}
 								}
 							}
-							// @TODO
-							//idx -= _disc.nBound[parType * _disc.nComp + comp]; // reset index used to access diffusion coefficient storage
 						}
 					}
 				}
@@ -1677,20 +1666,22 @@ protected:
 									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-										// row: add current component offset and go node strides from there for each dispersion block entry
-										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-										tripletList.push_back(T(offset + comp * sComp + i * sNode,
-																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - nNodes) * sNode,
-																0.0));
-
-										/* add surface diffusion dispersion block to solid */
-										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-											// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+											// row: add current component offset and go node strides from there for each dispersion block entry
 											// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-											tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+											tripletList.push_back(T(offset + comp * sComp + i * sNode,
 																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - nNodes) * sNode,
 																	0.0));
 
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+												// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+												tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																		offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - nNodes) * sNode,
+																		0.0));
+
+											}
 										}
 									}
 								}
@@ -1713,27 +1704,30 @@ protected:
 								// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
 								// col: add component offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
 								tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-														offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + j * sNode, 0.0));
+														offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + j * sNode,
+														0.0));
 								// handle surface diffusion of bound states. binding is handled in residualKernel().
 								if (_hasSurfaceDiffusion[parType]) {
 
 									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-										tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell + j * sNode,
-																0.0));
-
-										/* add surface diffusion dispersion block to solid */
-										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-											// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-											// col: jump over previous cells and liquid states, go back one cell, add current bound state offset and go node strides from there for each dispersion block entry
-											tripletList.push_back(T(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																	offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
+										if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
+											tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
+																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell + j * sNode,
 																	0.0));
 
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+												// col: jump over previous cells and liquid states, go back one cell, add current bound state offset and go node strides from there for each dispersion block entry
+												tripletList.push_back(T(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																		offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
+																		0.0));
+
+											}
 										}
 									}
 								}
@@ -1765,20 +1759,22 @@ protected:
 										int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 										for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-											tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
-																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (cell - 1) * sCell + j * sNode,
-																	0.0));
-
-											/* add surface diffusion dispersion block to solid */
-											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-												// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-												// col: jump over previous cells and liquid states, go back one cell, add current bound state offset and go node strides from there for each dispersion block entry
-												tripletList.push_back(T(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																		offset + (cell - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
+											if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+												// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+												// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
+												tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
+																		offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (cell - 1) * sCell + j * sNode,
 																		0.0));
 
+												/* add surface diffusion dispersion block to solid */
+												if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+													// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+													// col: jump over previous cells and liquid states, go back one cell, add current bound state offset and go node strides from there for each dispersion block entry
+													tripletList.push_back(T(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																			offset + (cell - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
+																			0.0));
+
+												}
 											}
 										}
 									}
@@ -1790,17 +1786,20 @@ protected:
 			}
 			else { //exact integration
 
-				/*			 left boundary cell				*/
+			/*			boundary cells			*/
 
+			/*			 left boundary cell				*/
+
+				unsigned int special = 0u; if (_disc.nParCell[parType] < 3u) special = 1u; // limits the iterator for special case nCells = 3 (dependence on additional entry)
 				// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 					for (unsigned int i = 0; i < nNodes; i++) {
-						for (unsigned int j = nNodes; j < 3 * nNodes + 1; j++) {
+						for (unsigned int j = nNodes + 1; j < 3 * nNodes + 2 - special; j++) {
 							// handle liquid state
 							// row: add component offset and go node strides from there for each dispersion block entry
-							// col: add component offset and go node strides from there for each dispersion block entry
+							// col: add component offset and go node strides from there for each dispersion block entry. adjust for j start
 							tripletList.push_back(T(offset + comp * sComp + i * sNode,
-													offset + comp * sComp + (j - nNodes) * sNode,
+													offset + comp * sComp + j * sNode - (nNodes + 1) * sNode,
 													0.0));
 
 							// handle surface diffusion of bound states. binding is handled in residualKernel().
@@ -1809,20 +1808,22 @@ protected:
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add current component offset and go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									tripletList.push_back(T(offset + comp * sComp + i * sNode,
-															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - nNodes) * sNode,
-															0.0));
-
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-										tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - nNodes) * sNode,
+									if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+										// row: add current component offset and go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry. adjust for j start
+										tripletList.push_back(T(offset + comp * sComp + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - (nNodes + 1) * sNode,
 																0.0));
 
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry. adjust for j start
+											tripletList.push_back(T(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - (nNodes + 1) * sNode,
+																	0.0));
+
+										}
 									}
 								}
 							}
@@ -1835,84 +1836,214 @@ protected:
 				// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 					for (unsigned int i = 0; i < nNodes; i++) {
-						for (unsigned int j = 0; j < 2 * nNodes + 1; j++) {
+
+						for (unsigned int j = special; j < 2 * nNodes + 1; j++) {
 							// handle liquid state
 							// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-							// col: add component offset and jump over previous cells. Go back one cell and one node and go node strides from there for each dispersion block entry
+							// col: add component offset and jump over previous cells. Go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
 							tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-													offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + (j - 1) * sNode, 0.0));
+													offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell - sCell - sNode + j * sNode,
+													0.0));
+
 							// handle surface diffusion of bound states. binding is handled in residualKernel().
 							if (_hasSurfaceDiffusion[parType]) {
 
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node, and go node strides from there for each dispersion block entry
-									tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell + (j - 1) * sNode,
-															0.0));
-
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-										// col: jump over previous cells and liquid states, go back one cell and node, add current bound state offset and go node strides from there for each dispersion block entry
-										tripletList.push_back(T(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (j - 1) * sNode,
+									if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
+										tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sNode + j * sNode,
 																0.0));
 
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+											// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
+											tripletList.push_back(T(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																	offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sNode + bnd + j * sNode,
+																	0.0));
+										}
 									}
 								}
 							}
 						}
 					}
 				}
+				if (_disc.nParCell[parType] == 3) {
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int i = 0; i < nNodes; i++) {
+							for (unsigned int j = 1; j < 3 * nNodes + 2 - 1; j++) {
+								// handle liquid state
+								// row: add component offset and jump over previous cell. Go node strides from there for each dispersion block entry
+								// col: add component offset. Go node strides from there for each dispersion block entry. adjust for j start
+								tripletList.push_back(T(offset + comp * sComp + sCell + i * sNode,
+														offset + comp * sComp + j * sNode - sNode,
+														0.0));
 
+								// handle surface diffusion of bound states. binding is handled in residualKernel().
+								if (_hasSurfaceDiffusion[parType]) {
+
+									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
+
+									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+										if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cell. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+											tripletList.push_back(T(offset + comp * sComp + sCell + i * sNode,
+																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode,
+																	0.0));
+
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+												// col: jump over liquid states, add current bound state offset and jump over previous cell. go node strides from there for each dispersion block entry. adjust for j start
+												tripletList.push_back(T(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																		offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode,
+																		0.0));
+
+											}
+										}
+									}
+								}
+
+							}
+						}
+					}
+				}// special case nCells == 3
+				/*	boundary cell neighbours (exist only if nCells >= 4)	*/
+				if (_disc.nParCell[parType] >= 4) {
+
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int i = 0; i < nNodes; i++) {
+							for (unsigned int j = 1; j < 3 * nNodes + 2; j++) {
+								// handle liquid state
+								// row: add component offset and jump over previous cell. Go node strides from there for each dispersion block entry
+								// col: add component offset. Go node strides from there for each dispersion block entry. adjust for j start
+								tripletList.push_back(T(offset + comp * sComp + sCell + i * sNode,
+														offset + comp * sComp + j * sNode - sNode,
+														0.0));
+
+								// handle surface diffusion of bound states. binding is handled in residualKernel().
+								if (_hasSurfaceDiffusion[parType]) {
+
+									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
+
+									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+										if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+											tripletList.push_back(T(offset + comp * sComp + sCell + i * sNode,
+																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode,
+																	0.0));
+
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+												// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+												tripletList.push_back(T(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																		offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode,
+																		0.0));
+
+											}
+										}
+									}
+								}
+
+							}
+						}
+					}
+
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int i = 0; i < nNodes; i++) {
+							for (unsigned int j = 0; j < 3 * nNodes + 2 - 1; j++) {
+								// handle liquid state
+								// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+								// col: add component offset and jump over previous cells. Go back one cell and node. Go node strides from there for each dispersion block entry.
+								tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + i * sNode,
+														offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell - sCell - sNode + j * sNode,
+														0.0));
+
+								// handle surface diffusion of bound states. binding is handled in residualKernel().
+								if (_hasSurfaceDiffusion[parType]) {
+
+									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
+
+									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+										if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
+											tripletList.push_back(T(offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + i * sNode,
+																	offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sCell - sNode + j * sNode,
+																	0.0));
+
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+												// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
+												tripletList.push_back(T(offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																		offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sCell - sNode + bnd + j * sNode,
+																		0.0));
+
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
+				}
 				///*				inner cells				*/
 
-				//for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
+			/* Inner cells (exist only if nCells >= 5) */
+				if (_disc.nParCell[parType] >= 5) {
 
-				//	// fill the jacobian: add dispersion block for each unbound and bound component, adjusted for the respective coefficients
-				//	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-				//		for (unsigned int i = 0; i < nNodes; i++) {
-				//			for (unsigned int j = 0; j < 3 * nNodes; j++) {
-				//				// pattern is more sparse than a nNodes x 3*nNodes block.
-				//				if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
-				//					(i == 0 && j <= 2 * nNodes) ||
-				//					(i == nNodes - 1 && j >= nNodes - 1)) {
-				//					// handle liquid state
-				//					// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-				//					// col: add component offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-				//					tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
-				//						offset + comp * sComp + (cell - 1) * sCell + j * sNode, 0.0));
-				//					// handle surface diffusion of bound states. binding is handled in residualKernel().
-				//					if (_hasSurfaceDiffusion[parType]) {
+					for (unsigned int cell = 2; cell < _disc.nParCell[parType] - 2; cell++) {
 
-				//						int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
+						for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+							for (unsigned int i = 0; i < nNodes; i++) {
+								for (unsigned int j = 0; j < 3 * nNodes + 2; j++) {
+									// handle liquid state
+									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+									// col: add component offset and jump over previous cells. Go back one cell and node. Go node strides from there for each dispersion block entry.
+									tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
+															offset + comp * sComp + cell * sCell - sCell - sNode + j * sNode,
+															0.0));
 
-				//						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-				//							// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-				//							// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-				//							tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
-				//								offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (cell - 1) * sCell + j * sNode,
-				//								0.0));
+									// handle surface diffusion of bound states. binding is handled in residualKernel().
+									if (_hasSurfaceDiffusion[parType]) {
 
-				//							/* add surface diffusion dispersion block to solid */
-				//							if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-				//								// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-				//								// col: jump over previous cells and liquid states, go back one cell, add current bound state offset and go node strides from there for each dispersion block entry
-				//								tripletList.push_back(T(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-				//									offset + (cell - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode,
-				//									0.0));
+										int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
-				//							}
-				//						}
-				//					}
-				//				}
-				//			}
-				//		}
-				//	}
-				//}
+										for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
+											if (_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)] != 0.0) {
+												// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+												// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
+												tripletList.push_back(T(offset + comp * sComp + cell * sCell + i * sNode,
+																		offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + cell * sCell - sCell - sNode + j * sNode,
+																		0.0));
+
+												/* add surface diffusion dispersion block to solid */
+												if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+													// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+													// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
+													tripletList.push_back(T(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																			offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd - sCell - sNode + j * sNode,
+																			0.0));
+
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
+				}
 
 			} // parExactInt
 		} // if nCells > 1
@@ -1925,15 +2056,19 @@ protected:
 	unsigned int calcConvDispNNZ() {
 
 		if (_disc.exactInt) {
-			return _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes);
+
+			return _disc.nComp * _disc.nNodes * _disc.nNodes + _disc.nNodes // convection entries
+			+ _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
 		}
 		else {
-			return _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes);
+
+			return _disc.nComp * _disc.nNodes * _disc.nNodes + 1u // convection entries
+				+ _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
 		}
 	}
 	unsigned int calcParDispNNZ(int parType) {
-		//@TODO!
-		if (_disc.exactInt) {
+
+		if (_disc.parExactInt[parType]) {
 			return _disc.nComp * ((3u * _disc.nParCell[parType] - 2u) * _disc.nParNode[parType] * _disc.nParNode[parType] + (2u * _disc.nParCell[parType] - 3u) * _disc.nParNode[parType]);
 		}
 		else {
@@ -1946,8 +2081,7 @@ protected:
 	*/
 	void setConvDispJacPattern(std::vector<T>& tripletList) {
 
-		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
-		tripletList.reserve(2u * calcConvDispNNZ());
+		tripletList.reserve(calcConvDispNNZ());
 
 		if (_disc.exactInt)
 			ConvDispExactIntPattern(tripletList);
@@ -1965,11 +2099,11 @@ protected:
 		// every bound state might depend on every bound and liquid state
 		for (int parNode = 0; parNode < _disc.nParPoints[parType]; parNode++) {
 			for (int bnd = 0; bnd < _disc.strideBound[parType]; bnd++) {
-				for (int conc = 0; conc < idxr.strideParShell(parType); conc++) {
+				for (int conc = 0; conc < idxr.strideParNode(parType); conc++) {
 					// row: jump over previous nodes and liquid states and add current bound state offset
 					// col: jump over previous nodes and add current concentration offset (liquid and bound)
-					tripletList.push_back(T(offset + parNode * idxr.strideParShell(parType) + idxr.strideParLiquid() + bnd,
-						offset + parNode * idxr.strideParShell(parType) + conc, 0.0));
+					tripletList.push_back(T(offset + parNode * idxr.strideParNode(parType) + idxr.strideParLiquid() + bnd,
+						offset + parNode * idxr.strideParNode(parType) + conc, 0.0));
 				}
 			}
 		}
@@ -1979,25 +2113,27 @@ protected:
 	 *@brief adds the time derivative entries from particle equations
 	 *@detail since the main diagonal entries are already set, we actually only set the solid phase time derivative entries for the discretized particle mass balance equations
 	 */
-	void parTimeDerJacPattern_GRM(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode) {
+	void parTimeDerJacPattern_GRM(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode, unsigned int secIdx) {
 
 		Indexer idxr(_disc);
 
+		active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 
 		for (unsigned int parNode = 0; parNode < _disc.nParPoints[parType]; parNode++) {
 
-			// todo cant call _parCoreRadius here somehow?
-			//if (parNode == 0u && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0)
-			//	continue; // discretization special case: we get an algebraic equation at inner particle boundary
+			// discretization special case: we get an algebraic equation at inner particle boundary
+			 if (!_disc.parExactInt[parType]  && parNode == 0u && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab && _parCoreRadius[parType] == 0.0)
+				continue;
 
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 
 				for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
 					// row: jump over previous nodes add current component offset
 					// col: jump over previous nodes, liquid phase and previous bound states
-					tripletList.push_back(T(offset + parNode * idxr.strideParShell(parType) + comp,
-						offset + parNode * idxr.strideParShell(parType) + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd, 0.0));
+					tripletList.push_back(T(offset + parNode * idxr.strideParNode(parType) + comp,
+											offset + parNode * idxr.strideParNode(parType) + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd,
+											0.0));
 				}
 			}
 		}
@@ -2007,22 +2143,42 @@ protected:
 
 		calcParticleJacobianPattern(tripletList, parType, colNode, secIdx);
 
-		parTimeDerJacPattern_GRM(tripletList, parType, colNode);
+		parTimeDerJacPattern_GRM(tripletList, parType, colNode, secIdx);
 
 		parIsothermPattern_GRM(tripletList, parType, colNode);
 
 	}
 
+	// @todo code review, is there a different more elegant/easy way?
 	/**
-	 * @brief analytically calculates the particle dispersion jacobian of the exact integration DG scheme for one particle type and bead
+	 * @brief returns the offset between state order and parameter storage (bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2, ...) for one components bound state for a certain particle type
+	*/
+	unsigned int getOffsetSurfDiff(unsigned int parType, unsigned int comp, unsigned int bnd) {
+		
+		unsigned int offNextBound = 0;
+		
+		// we need to estimate the offset to the next parameter of current components next bound state
+		// Ordering of particle surface diffusion: bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
+			for (unsigned int _comp = 0; _comp < _disc.nComp; _comp++) {
+				if(_comp < comp) // if its a component that occurs before comp, add all bound states of that component up to bnd + 1 (note that bound index starts at 0 -> +1).
+					offNextBound += std::min(bnd + 1u, _disc.nBound[parType * _disc.nComp + _comp]);
+				else // Otherwise, only add all previous (i.e. up to bnd) bound states of that component. This includes the current component itself (comp == _comp).
+					offNextBound += std::min(bnd, _disc.nBound[parType * _disc.nComp + _comp]);
+			}
+
+		return offNextBound;
+	}
+
+	/**
+	 * @brief analytically calculates the particle dispersion jacobian of the exact integration DG scheme for a single particle type and bead
 	*/
 	int calcParticleJacobianExInt(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
 
 		Indexer idxr(_disc);
 
 		// (global) strides
-		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParShell(parType);
-		unsigned int sNode = idxr.strideParShell(parType);
+		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParNode(parType);
+		unsigned int sNode = idxr.strideParNode(parType);
 		unsigned int sComp = 1u;
 		//
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
@@ -2063,21 +2219,23 @@ protected:
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-								/* add surface diffusion dispersion block to liquid */
-								// row: add current component offset and go node strides from there for each dispersion block entry
-								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-								_globalJac.coeffRef(offset + comp * sComp + i * sNode,
-													offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-										= -(static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp]) * dispBlock(i, j);
-
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-									// row: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									/* add surface diffusion dispersion block to liquid */
+									// row: add current component offset and go node strides from there for each dispersion block entry
 									// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+									_globalJac.coeffRef(offset + comp * sComp + i * sNode,
 														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-										= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
+										= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp]) * dispBlock(i, j);
 
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+											= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+
+									}
 								}
 							}
 						}
@@ -2114,20 +2272,22 @@ protected:
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-								// row: add current component offset and go node strides from there for each dispersion block entry
-								// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry. adjust for j start
-								_globalJac.coeffRef(offset + comp * sComp + i * sNode,
-													offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - (nNodes + 1) * sNode)
-										= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
-
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-									// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									// row: add current component offset and go node strides from there for each dispersion block entry
 									// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry. adjust for j start
-									_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+									_globalJac.coeffRef(offset + comp * sComp + i * sNode,
 														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - (nNodes + 1) * sNode)
-										= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
+										= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry. adjust for j start
+										_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - (nNodes + 1) * sNode)
+											= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+
+									}
 								}
 							}
 						}
@@ -2160,20 +2320,22 @@ protected:
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-								// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-								// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
-								_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-													offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sNode + j * sNode)
-										= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+									// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
+									_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
+														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sNode + j * sNode)
+										= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-									// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-									// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
-									_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-														offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sNode + bnd + j * sNode)
-										= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+										// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell (and node or adjust for start) and go node strides from there for each dispersion block entry.
+										_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+															offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sNode + bnd + j * sNode)
+											= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
 
+									}
 								}
 							}
 						}
@@ -2198,20 +2360,22 @@ protected:
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-								// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-								// col: jump over liquid states, add current bound state offset and jump over previous cell. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
-								_globalJac.coeffRef(offset + comp * sComp + sCell + i * sNode,
-													offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
-									= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
-
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-									// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and jump over previous cell. go node strides from there for each dispersion block entry. adjust for j start
-									_globalJac.coeffRef(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+									// col: jump over liquid states, add current bound state offset and jump over previous cell. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+									_globalJac.coeffRef(offset + comp * sComp + sCell + i * sNode,
 														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
-										= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
+										= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and jump over previous cell. go node strides from there for each dispersion block entry. adjust for j start
+										_globalJac.coeffRef(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
+											= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+
+									}
 								}
 							}
 						}
@@ -2241,20 +2405,22 @@ protected:
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry. adjust for j start
-									_globalJac.coeffRef(offset + comp * sComp + sCell + i * sNode,
-														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
-											= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
-
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-										// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
-										_globalJac.coeffRef(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+										_globalJac.coeffRef(offset + comp * sComp + sCell + i * sNode,
 															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
-											= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
+											= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+											// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and go node strides from there for each dispersion block entry. adjust for j start
+											_globalJac.coeffRef(offset + sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode - sNode)
+												= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+
+										}
 									}
 								}
 							}
@@ -2281,20 +2447,21 @@ protected:
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
-									_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + i * sNode,
-														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sCell - sNode + j * sNode)
-											= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
+										_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 2) * sCell + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell - sCell - sNode + j * sNode)
+											= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-										// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
-										_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-															offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sCell - sNode + bnd + j * sNode)
-											= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
-
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+											// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
+											_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) - sCell - sNode + bnd + j * sNode)
+												= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+										}
 									}
 								}
 							}
@@ -2328,20 +2495,21 @@ protected:
 									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
-										_globalJac.coeffRef(offset + comp * sComp + cell * sCell + i * sNode,
-															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + cell * sCell - sCell - sNode + j * sNode)
-												= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j);
+										if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and node and go node strides from there for each dispersion block entry
+											_globalJac.coeffRef(offset + comp * sComp + cell * sCell + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + cell * sCell - sCell - sNode + j * sNode)
+												= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j);
 
-										/* add surface diffusion dispersion block to solid */
-										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-											// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-											// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
-											_globalJac.coeffRef(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd - sCell - sNode + j * sNode)
-												= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j);
-
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+												// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and node and go node strides from there for each dispersion block entry
+												_globalJac.coeffRef(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																	offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd - sCell - sNode + j * sNode)
+													= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j);
+											}
 										}
 									}
 								}
@@ -2364,8 +2532,8 @@ protected:
 		Indexer idxr(_disc);
 
 		// (global) strides
-		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParShell(parType);
-		unsigned int sNode = idxr.strideParShell(parType);
+		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParNode(parType);
+		unsigned int sNode = idxr.strideParNode(parType);
 		unsigned int sComp = 1u;
 		//
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
@@ -2420,21 +2588,23 @@ protected:
 							int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-								/* add surface diffusion dispersion block to liquid */
-								// row: add current component offset and go node strides from there for each dispersion block entry
-								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-								_globalJac.coeffRef(offset + comp * sComp + i * sNode,
-									offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-									= -(static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp]) * dispBlock(i, j); // -  D_s * (1 / Beta_p) * (Delta r / 2)^2 * (D_r D - M^-1 B D)
-								
-								/* add surface diffusion dispersion block to solid */
-								if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-								// row: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-								// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-										offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-										= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									/* add surface diffusion dispersion block to liquid */
+									// row: add current component offset and go node strides from there for each dispersion block entry
+									// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+									_globalJac.coeffRef(offset + comp * sComp + i * sNode,
+														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+										= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp]) * dispBlock(i, j); // -  D_s * (1 / Beta_p) * (Delta r / 2)^2 * (D_r D - M^-1 B D)
 
+									/* add surface diffusion dispersion block to solid */
+									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+										// row: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										// col: jump oover liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+										_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+											= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+
+									}
 								}
 							}
 						}
@@ -2517,20 +2687,22 @@ protected:
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add current component offset and go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-									_globalJac.coeffRef(offset + comp * sComp + i * sNode,
-														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-										= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * bnd_dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
-
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										// row: add current component offset and go node strides from there for each dispersion block entry
 										// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-										_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+										_globalJac.coeffRef(offset + comp * sComp + i * sNode,
 															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-											= -(static_cast<double>(parSurfDiff[bnd])) * bnd_dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+											= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * bnd_dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
 
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+											_globalJac.coeffRef(offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+												= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * bnd_dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+
+										}
 									}
 								}
 							}
@@ -2571,20 +2743,22 @@ protected:
 								int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-									// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-									// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-									_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
-														offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell + j * sNode)
-										= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * bnd_dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
+										_globalJac.coeffRef(offset + comp * sComp + (_disc.nParCell[parType] - 1) * sCell + i * sNode,
+															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (_disc.nParCell[parType] - 2) * sCell + j * sNode)
+											= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * bnd_dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
 
-									/* add surface diffusion dispersion block to solid */
-									if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-										// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
-										// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and go node strides from there for each dispersion block entry
-										_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-															offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-											= -(static_cast<double>(parSurfDiff[bnd])) * bnd_dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+										/* add surface diffusion dispersion block to solid */
+										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+											// row: jump over previous cells and over liquid states, add current bound state offset. go node strides from there for each dispersion block entry
+											// col: jump over previous cells and over liquid states, add current bound state offset. go back one cell and go node strides from there for each dispersion block entry
+											_globalJac.coeffRef(offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																offset + (_disc.nParCell[parType] - 2) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+												= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * bnd_dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
 
+										}
 									}
 								}
 							}
@@ -2642,20 +2816,22 @@ protected:
 									int const* const qsReaction = _binding[parType]->reactionQuasiStationarity();
 
 									for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++) {
-										// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
-										// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
-										_globalJac.coeffRef(offset + comp * sComp + cell * sCell + i * sNode,
-															offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (cell - 1) * sCell + j * sNode)
-											= -static_cast<double>(parSurfDiff[bnd]) * invBetaP[comp] * dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
+										if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+											// row: add component offset and jump over previous cells. Go node strides from there for each dispersion block entry
+											// col: jump over liquid states, add current bound state offset and jump over previous cells. Go back one cell and go node strides from there for each dispersion block entry
+											_globalJac.coeffRef(offset + comp * sComp + cell * sCell + i * sNode,
+																offset + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + (cell - 1) * sCell + j * sNode)
+												= -static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) * invBetaP[comp] * dispBlock(i, j); // dispBlock <- D_s * invBeta * [ M^-1 * M_r * G_l +  invMap * ( D * G_l - M^-1 * B * [G_l - g^*] ) ]
 
-										/* add surface diffusion dispersion block to solid */
-										if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
-											// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
-											// col: jump over previous cells and liquid states, go back one cell and add current bound state offset and go node strides from there for each dispersion block entry
-											_globalJac.coeffRef(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
-																offset + (cell - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
-												= -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
+											/* add surface diffusion dispersion block to solid */
+											if (!qsReaction[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd]) {
+												// row: jump over previous cells and liquid states, add current bound state offset and go node strides from there for each dispersion block entry
+												// col: jump over previous cells and liquid states, go back one cell and add current bound state offset and go node strides from there for each dispersion block entry
+												_globalJac.coeffRef(offset + cell * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + i * sNode,
+																	offset + (cell - 1) * sCell + idxr.strideParLiquid() + idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd + j * sNode)
+													= -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(i, j); // -  D_s * (Delta r / 2)^2 * (D_r D - M^-1 B D)
 
+											}
 										}
 									}
 								}
@@ -2674,14 +2850,16 @@ protected:
 	/**
 	 * @brief adds the analytically estimated jacobian entries of the DG jacobian which have been overwritten by the binding kernel (only use for surface diffusion combined with kinetic binding)
 	 * @detail only adds the entries d RHS_i / d c^s_i, which lie on the diagonal
+	 * @parType[in] current particle type
+	 * @parSurfDiff[in] pointer to particle surface diffusion at current section and particle type
 	*/
 	int addSolidDGentries(unsigned int parType, const active* const parSurfDiff) {
 
 		Indexer idxr(_disc);
 
 		// (global) strides
-		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParShell(parType);
-		unsigned int sNode = idxr.strideParShell(parType);
+		unsigned int sCell = _disc.nParNode[parType] * idxr.strideParNode(parType);
+		unsigned int sNode = idxr.strideParNode(parType);
 		unsigned int sComp = 1u;
 		//
 		unsigned int nNodes = _disc.nParNode[parType];
@@ -2738,11 +2916,15 @@ protected:
 				// start at first solid entry
 				linalg::BandedEigenSparseRowIterator jac(_globalJac, offset + idxr.strideParLiquid());
 
-				// Ordering of particle surface diffusion: // @TODO solve this ordering ...
-				// bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2
 				for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac += idxr.strideParLiquid()) {
-					for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; bnd++, ++jac) {
-						jac[0] += -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(node, node);
+					
+					// @TODO test if we use correct diffusion parameter entry for more complicated cases, i.e. multiple comp, bnd states
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac) {
+							if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+								jac[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, node);
+							}
+						}
 					}
 				}
 			}
@@ -2815,8 +2997,12 @@ protected:
 				linalg::BandedEigenSparseRowIterator jac_left(_globalJac, offset + idxr.strideParLiquid());
 
 				for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_left += idxr.strideParLiquid()) {
-					for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; bnd++, ++jac_left) {
-						jac_left[0] += -(static_cast<double>(parSurfDiff[bnd])) * bnd_dispBlock(node, node);
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_left) {
+							if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+								jac_left[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * bnd_dispBlock(node, node);
+							}
+						}
 					}
 				}
 			}
@@ -2846,10 +3032,14 @@ protected:
 				unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 				// start at first solid entry of last cell
 				linalg::BandedEigenSparseRowIterator jac_right(_globalJac, offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid());
-
+				
 				for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_right += idxr.strideParLiquid()) {
-					for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; bnd++, ++jac_right) {
-						jac_right[0] += -(static_cast<double>(parSurfDiff[bnd])) * bnd_dispBlock(node, _disc.nParNode[parType] + node);
+					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_right) {
+							if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+								jac_right[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * bnd_dispBlock(node, _disc.nParNode[parType] + node);
+							}
+						}
 					}
 				}
 			}
@@ -2876,8 +3066,12 @@ protected:
 						linalg::BandedEigenSparseRowIterator jac_inner(_globalJac, offset + cell * sCell + idxr.strideParLiquid());
 
 						for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_inner += idxr.strideParLiquid()) {
-							for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; bnd++, ++jac_inner) {
-								jac_inner[0] += -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(node, _disc.nParNode[parType] + node);
+							for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_inner) {
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										jac_inner[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, _disc.nParNode[parType] + node);
+									}
+								}
 							}
 						}
 					}
@@ -2917,8 +3111,12 @@ protected:
 						linalg::BandedEigenSparseRowIterator jac_inner(_globalJac, offset + cell * sCell + idxr.strideParLiquid());
 
 						for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_inner += idxr.strideParLiquid()) {
-							for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; bnd++, ++jac_inner) {
-								jac_inner[0] += -(static_cast<double>(parSurfDiff[bnd])) * dispBlock(node, _disc.nParNode[parType] + node);
+							for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_inner) {
+									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+										jac_inner[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, _disc.nParNode[parType] + node);
+									}
+								}
 							}
 						}
 					}
@@ -3546,9 +3744,13 @@ protected:
 
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
+			gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
 			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
+
+			//gStarDC.block(0, nNodes + nNodes, 1, 1) += gStarDC.block(0, nNodes + nNodes + 1, 1, 1);// Korrektur right
+
 			gStarDC *= 0.5;
+
 			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * GBlockBound_r - _disc.invMM * B * GBlockBound_r;
@@ -3561,8 +3763,11 @@ protected:
 
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
+			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
+
+			//gStarDC.block(nNodes - 1, nNodes + 1, 1, 1) += gStarDC.block(nNodes - 1, nNodes, 1, 1);// Korrektur
+
 			gStarDC *= 0.5;
 			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
@@ -3598,7 +3803,7 @@ protected:
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 			gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
 			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			
+
 			gStarDC.block(0, nNodes + nNodes, 1, 1) += gStarDC.block(0, nNodes + nNodes + 1, 1, 1);// Korrektur
 
 			gStarDC *= 0.5;
@@ -3628,7 +3833,7 @@ protected:
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			
+
 			gStarDC.block(nNodes - 1, nNodes + 1, 1, 1) += gStarDC.block(nNodes - 1, nNodes, 1, 1);// Korrektur
 
 			gStarDC *= 0.5;
@@ -3979,17 +4184,12 @@ protected:
 		int isothermNNZ = 0;
 		int particleEntries = 0;
 		for (int type = 0; type < _disc.nParType; type++) {
-			isothermNNZ = (idxr.strideParShell(type)) * _disc.nParPoints[type] * _disc.strideBound[type]; // every bound satte might depend on every bound and liquid state
+			isothermNNZ = (idxr.strideParNode(type)) * _disc.nParPoints[type] * _disc.strideBound[type]; // every bound satte might depend on every bound and liquid state
 			addTimeDer = _disc.nParPoints[type] * _disc.strideBound[type];
 			particleEntries += calcParDispNNZ(type) + addTimeDer + isothermNNZ;
 		}
-		// flux @TODO
-		int nBCSurfDiff = 0; // Boundary condition surface diffusion
-		//for (int type = 0; type < _disc.nParType; type++) {
-		//	if (_disc.hasSurfDiff(type))
-		//		nBCSurfDiff += _disc.strideBound[type];
-		//}
-		int fluxEntries = 4 * _disc.nParType * _disc.nPoints * _disc.nComp + nBCSurfDiff;
+
+		int fluxEntries = 4 * _disc.nParType * _disc.nPoints * _disc.nComp;
 
 		tripletList.reserve(fluxEntries + bulkEntries + particleEntries);
 
@@ -4024,14 +4224,14 @@ protected:
 						// row: add particle offset to current parType and particle, go to last node and add component offset
 						// col: add flux offset to current component, jump over previous nodes and components
 						tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ colNode })
-												+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(),
+												+ (_disc.nParPoints[type] - 1) * idxr.strideParNode(type) + comp * idxr.strideParComp(),
 												idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
 					else {
 						for (unsigned int node = 0; node < _disc.nParNode[type]; node++) {
 							// row: add particle offset to current parType and particle, go to last cell and current node and add component offset
 							// col: add flux offset to current component, jump over previous nodes and components
-							tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ colNode }) + (_disc.nParCell[type] - 1) * _disc.nParNode[type] * idxr.strideParShell(type)
-													+ node * idxr.strideParShell(type) + comp * idxr.strideParComp(),
+							tripletList.push_back(T(idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ colNode }) + (_disc.nParCell[type] - 1) * _disc.nParNode[type] * idxr.strideParNode(type)
+													+ node * idxr.strideParNode(type) + comp * idxr.strideParComp(),
 													idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp, 0.0));
 						}
 					}
@@ -4040,8 +4240,8 @@ protected:
 					// row: add flux offset to current parType, jump over previous nodes and components
 					// col: add particle offset to current parType, jump over previous particles and components
 					tripletList.push_back(T(idxr.offsetJf(ParticleTypeIndex{ type }) + colNode * _disc.nComp + comp,
-											idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
-											+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp(), 0.0));
+											idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParNode(type)
+											+ (_disc.nParPoints[type] - 1) * idxr.strideParNode(type) + comp * idxr.strideParComp(), 0.0));
 
 					// add F on F entries (identity matrix)
 					// row: add flux offset to current parType, jump over previous nodes and components
@@ -4077,12 +4277,11 @@ protected:
 
 			linalg::BandedEigenSparseRowIterator jacClF(_globalJac, idxr.offsetC());
 			linalg::BandedEigenSparseRowIterator jacFCl(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }));
-			linalg::BandedEigenSparseRowIterator jacCpF(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) + (_disc.nParPoints[type] - 1) * idxr.strideParShell(type));
+			linalg::BandedEigenSparseRowIterator jacCpF(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type));
 			linalg::BandedEigenSparseRowIterator jacFCp(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }));
-			// @TODO: quasi-stationary binding, surfacediffusion BC
 			linalg::BandedEigenSparseRowIterator jacFF(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }));
 
-			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCpF += _disc.strideBound[type] + (_disc.nParPoints[type] - 1) * idxr.strideParShell(type))
+			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCpF += _disc.strideBound[type] + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type))
 			{
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacClF, ++jacFCl, ++jacCpF, ++jacFCp, ++jacFF) {
 					// add Cl on F entries
@@ -4105,7 +4304,7 @@ protected:
 							= -2.0 / _disc.deltaR[type] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 					}
 					else {
-						for (int node = _disc.parPolyDeg[type]; node >= 0; node--, jacCpF -= idxr.strideParShell(type)) {
+						for (int node = _disc.parPolyDeg[type]; node >= 0; node--, jacCpF -= idxr.strideParNode(type)) {
 							// row: already at particle. Already at current node and liquid state.
 							// col: go to flux of current parType. jump over previous colNodes and add component offset
 							jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
@@ -4113,14 +4312,14 @@ protected:
 							= - 2.0 / _disc.deltaR[type] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						}
 						// set back iterator to first node as required by component loop
-						jacCpF += _disc.nParNode[type] * idxr.strideParShell(type);
+						jacCpF += _disc.nParNode[type] * idxr.strideParNode(type);
 					}
 
 					// add F on Cp entries
 					// row: already at flux of current parType. already at current node and component.
 					// col: go back to current particle type. jump over previous particles, go to last node and add component offset
-					jacFCp[-jacFCp.row() + idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParShell(type)
-						+ (_disc.nParPoints[type] - 1) * idxr.strideParShell(type) + comp * idxr.strideParComp()]
+					jacFCp[-jacFCp.row() + idxr.offsetCp(ParticleTypeIndex{ type }) + colNode * _disc.nParPoints[type] * idxr.strideParNode(type)
+						+ (_disc.nParPoints[type] - 1) * idxr.strideParNode(type) + comp * idxr.strideParComp()]
 						= static_cast<double>(filmDiff[comp]);
 
 					// add F on F entries (identity matrix)
