@@ -280,6 +280,8 @@ namespace cadet
 				paramProvider.popScope();
 			}
 
+			//FDjac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete!
+
 			return bindingConfSuccess && reactionConfSuccess;
 		}
 
@@ -467,6 +469,8 @@ namespace cadet
 		{
 			BENCH_SCOPE(_timerResidual);
 
+			//FDjac = calcFDJacobian(simTime, threadLocalMem, 2.0); // todo delete!
+
 			// Evaluate residual, use AD for Jacobian if required but do not evaluate parameter derivatives
 			return residual(simTime, simState, res, adJac, threadLocalMem, true, false);
 		}
@@ -591,8 +595,6 @@ namespace cadet
 			// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac
 			updateSection(secIdx);
 
-			//auto start = std::chrono::high_resolution_clock::now();
-
 			if (wantJac) {
 
 				if (_disc.newStaticJac) { // static part of jacobian only needs to be updated at new sections
@@ -610,21 +612,6 @@ namespace cadet
 				
 			}
 
-			//auto stop = std::chrono::high_resolution_clock::now();
-			//auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-			//std::cout << "Jac duration: " << duration.count() << std::endl;
-
-			//if (ypPtr) {
-			//	std::cout << "IN: yp   y   res \n" << std::endl;
-			//	for (int i = 0; i < numDofs(); i++) {
-			//		std::cout << yp[i] << "	" << y[i] << "	" << res[i] << std::endl;
-			//	}
-			//}
-
-			//std::cout << "t= " << t << "  c_in = [" << y[0] << ", " << y[1] << "]" << std::endl;
-
-			//start = std::chrono::high_resolution_clock::now();
-
 			// ==================================//
 			// Estimate isotherm Residual		 //
 			// ==================================//
@@ -637,10 +624,7 @@ namespace cadet
 
 					Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(ypPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
 					Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		qRes_comp(resPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-					//if (ypPtr)
-					//	std::cout << "yDot is NULLPTR !" << std::endl;
-					//std::cout << "qRes:\n" << qRes_comp << std::endl;
-					//std::cout << "qDot:\n" << qDot_comp << std::endl;
+
 					if (!_disc.isKinetic[idxr.offsetBoundComp(comp)]) {
 						// -RHS_q already stored in res_q
 					}
@@ -667,16 +651,6 @@ namespace cadet
 				_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
 				ConvDisp_DG(C_comp, cRes_comp, t, comp);
 
-				//if (t > 12) {
-				//	std::cout << "STOP" << std::endl;
-				//}
-				//if (ypPtr) {
-				//	std::cout << "RHS: yp   y   res \n" << std::endl;
-				//	for (int i = 0; i < numDofs(); i++) {
-				//		std::cout << yp[i] << "	" << y[i] << "	" << res[i] << std::endl;
-				//	}
-				//}
-
 				/*	residual	*/
 
 				res[comp] = y[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
@@ -691,18 +665,6 @@ namespace cadet
 				}
 			}
 
-			//stop = std::chrono::high_resolution_clock::now();
-			//duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-			//std::cout << "residual duration: " << duration.count() << std::endl;
-
-			//std::cout << "t= " << t << "  res_in = [" << res[0] << ", " << res[1] << "]" << std::endl;
-
-			//if (ypPtr) {
-			//	std::cout << "RES: yp   y   res \n t = " << t << std::endl;
-			//	for (int i = 0; i < numDofs(); i++) {
-			//		std::cout << yp[i] << "	" << y[i] << "	" << res[i] << std::endl;
-			//	}
-			//}
 			return 0;
 		}
 
@@ -878,13 +840,20 @@ namespace cadet
 			// Assemble Jacobian
 			assembleDiscretizedJacobian(alpha, idxr);
 
+			// todo delete debug code jacobian
+			////std::cout << std::fixed << std::setprecision(3) << "FD jac:" << std::endl;
+			////std::cout << FDjac << std::endl;
+			////std::cout << "analytical jac:" << std::endl;
+			////std::cout << _jacDisc.toDense() << std::endl;
+			//bool equal = (_jacDisc.toDense().isApprox(FDjac.block(1, 1, numPureDofs(), numPureDofs()), 1e-10));
+			//std::cout << "equal: " << equal << std::endl;
+			//std::cout << "max deviation: " << std::setprecision(10) << (_jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs())).maxCoeff() << std::endl;
+			////std::cout << "deviation pattern:\n" << std::setprecision(3) << _jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
+
 			// solve J x = rhs
 			Eigen::Map<VectorXd> r(rhs, numDofs());
 
-			//std::cout << "t= " << t << "  rhs_in = [" << r[0] << ", " << r[1] << "]" << std::endl;
-			//std::cout << "linSol z:\n" << r << std::endl;
-			//std::cout << "jacDisc z:\n" << _jacDisc.toDense() << std::endl;
-
+			// todo iterative solver?
 			//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> solver;
 			//Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
 

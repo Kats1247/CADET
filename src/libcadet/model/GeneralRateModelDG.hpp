@@ -3627,7 +3627,6 @@ protected:
 
 		dispBlock *= 2 / _disc.deltaR[parType];
 
-
 		return dispBlock;
 	}
 
@@ -3801,11 +3800,8 @@ protected:
 			int cell = 1;
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
+			gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
 			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-
-			gStarDC.block(0, nNodes + nNodes, 1, 1) += gStarDC.block(0, nNodes + nNodes + 1, 1, 1);// Korrektur
-
 			gStarDC *= 0.5;
 
 			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
@@ -3819,23 +3815,14 @@ protected:
 				dispBlock *= 2 / _disc.deltaR[parType];
 			}
 
-			//std::cout << std::fixed << std::setprecision(3) << "surfIntContr\n" << _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC * 2 / _disc.deltaR[parType] << std::endl;
-			//std::cout << "Bblock\n" << getParBMatrix(nNodes, parType, cell) << std::endl;
-			//std::cout << "gStarDC\n" << gStarDC << std::endl;
-			//std::cout << "G_r\n" << GBlockBound_r << std::endl;
-			//std::cout << "invMM\n" << _disc.parInvMM[_disc.offsetMetric[parType] + cell] << std::endl;
-
 			return dispBlock;
 		}
 		else { // left boundary cell
 			int cell = 0;
 			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
+			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
 			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-
-			gStarDC.block(nNodes - 1, nNodes + 1, 1, 1) += gStarDC.block(nNodes - 1, nNodes, 1, 1);// Korrektur
-
 			gStarDC *= 0.5;
 
 			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
@@ -3926,6 +3913,7 @@ protected:
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
 			dispBlock *= 2 / _disc.deltaR[parType];
 		}
+
 		return dispBlock;
 	}
 
@@ -4014,10 +4002,9 @@ protected:
 			// left boundary cell
 
 			dispBlock = leftBndryCellBlock();
-			unsigned int special = 0u; if (nCells == 3u) special = 1u; // limits the iterator for special case nCells = 3
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = nNodes + 1; j < dispBlock.cols() - special; j++) {
+					for (unsigned int j = nNodes + 1; j < dispBlock.cols(); j++) {
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
 						_globalJac.coeffRef(offC + comp * sComp + i * sNode,
@@ -4033,7 +4020,7 @@ protected:
 
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = special; j < 2 * nNodes + 1; j++) {
+					for (unsigned int j = 0; j < 2 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for relevant dispersion block entries.
 						_globalJac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
