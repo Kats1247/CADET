@@ -1478,7 +1478,7 @@ void GeneralRateModelDG::applyInitialCondition(const SimulationState& simState) 
 			// Loop over particle nodes
 			for (unsigned int shell = 0; shell < _disc.nParPoints[type]; ++shell)
 			{
-				const unsigned int shellOffset = offset + shell * idxr.strideParShell(type);
+				const unsigned int shellOffset = offset + shell * idxr.strideParNode(type);
 
 				// Initialize c_p
 				for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
@@ -1613,6 +1613,18 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 
 	Indexer idxr(_disc);
 
+	// no consistent initialization for inexact integration DG discretization of particle mass balance. 
+	for (unsigned int type = 0; type < _disc.nParType; type++) {
+		if (_disc.parExactInt[type] == false) {
+			LOG(Error) << "No consistent initialization for inexact integration DG discretization in particles (cf. par_exact_integration). If consistent initialization is required, change to exact integration.";
+			// Reset j_f to 0.0 and (only) compute fluxes j_f
+			double* const jf = vecStateY + idxr.offsetJf();
+			std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
+			solveForFluxes(vecStateY, idxr);
+			return;
+		}
+	}
+	
 	// Step 1: Solve algebraic equations
 
 	// Step 1a: Compute quasi-stationary binding model state
@@ -1656,12 +1668,12 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 		{
 			LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
-			// Reuse memory of band matrix for dense matrix
-			linalg::DenseMatrixView fullJacobianMatrix(_jacPdisc[type * _disc.nPoints + pblk].valuePtr(), nullptr, mask.len, mask.len);
+			// Reuse memory of sparse matrix for dense matrix
+			linalg::DenseMatrixView fullJacobianMatrix(_globalJacDisc.valuePtr() + _globalJacDisc.outerIndexPtr()[idxr.offsetCp(ParticleTypeIndex{ type }) + pblk], nullptr, mask.len, mask.len);
 
 			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
 			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
+				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.colLength;
 
 			// Get workspace memory
 			BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -1682,14 +1694,14 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			BufferedArray<double> conservedQuantsBuffer = tlmAlloc.array<double>(numActiveComp);
 			double* const conservedQuants = static_cast<double*>(conservedQuantsBuffer);
 
-			linalg::DenseMatrixView jacobianMatrix(jacobianMem, _jacPdisc[type * _disc.nPoints + pblk].innerIndexPtr(), probSize, probSize);
+			linalg::DenseMatrixView jacobianMatrix(jacobianMem, _globalJacDisc.outerIndexPtr(), probSize, probSize);
 			const parts::cell::CellParameters cellResParams = makeCellResidualParams(type, mask.mask + _disc.nComp);
 
 			// This loop cannot be run in parallel without creating a Jacobian matrix for each thread which would increase memory usage
 			const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
-			for (std::size_t shell = 0; shell < static_cast<std::size_t>(_disc.nParPoints[type]); ++shell)
+			for (std::size_t node = 0; node < static_cast<std::size_t>(_disc.nParPoints[type]); ++node)
 			{
-				const int localOffsetInParticle = static_cast<int>(shell) * idxr.strideParShell(type);
+				const int localOffsetInParticle = static_cast<int>(node) * idxr.strideParNode(type);
 
 				// Get pointer to q variables in a shell of particle pblk
 				double* const qShell = vecStateY + localOffsetToParticle + localOffsetInParticle + idxr.strideParLiquid();
@@ -1697,8 +1709,8 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 				active* const localAdY = adJac.adY ? adJac.adY + localOffsetToParticle + localOffsetInParticle : nullptr;
 
 				// r (particle) coordinate of current node
-				const double r = _disc.deltaR[type] * std::floor(shell / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][shell % _disc.nParNode[type]]);
+				const double r = _disc.deltaR[type] * std::floor(node / _disc.nParNode[type])
+					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][node % _disc.nParNode[type]]);
 				const ColumnPosition colPos{ z, 0.0, r };
 
 				// Determine whether nonlinear solver is required
@@ -1713,6 +1725,8 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 				linalg::conservedMoietiesFromPartitionedMask(mask, _disc.nBound + type * _disc.nComp, _disc.nComp, qShell - _disc.nComp, conservedQuants, static_cast<double>(_parPorosity[type]), epsQ);
 
 				std::function<bool(double const* const, linalg::detail::DenseMatrixBase&)> jacFunc;
+
+				// @todo AD for DG
 //				if (localAdY && localAdRes)
 //				{
 //					jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
@@ -1791,52 +1805,52 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 //				}
 //				else
 //				{
-					jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
+				jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
+				{
+					// Prepare input vector by overwriting masked items
+					std::copy_n(qShell - _disc.nComp, mask.len, fullX);
+					linalg::applyVectorSubset(x, mask, fullX);
+
+					// Call residual function
+					parts::cell::residualKernel<double, double, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, true, true>(
+						simTime.t, simTime.secIdx, colPos, fullX, nullptr, fullResidual, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
+						);
+
+					// Extract Jacobian from full Jacobian
+					mat.setAll(0.0);
+					linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
+
+					// Replace upper part with conservation relations
+					mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
+
+					unsigned int bndIdx = 0;
+					unsigned int rIdx = 0;
+					unsigned int bIdx = 0;
+					for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 					{
-						// Prepare input vector by overwriting masked items
-						std::copy_n(qShell - _disc.nComp, mask.len, fullX);
-						linalg::applyVectorSubset(x, mask, fullX);
-
-						// Call residual function
-						parts::cell::residualKernel<double, double, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, true, true>(
-							simTime.t, simTime.secIdx, colPos, fullX, nullptr, fullResidual, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
-							);
-
-						// Extract Jacobian from full Jacobian
-						mat.setAll(0.0);
-						linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
-
-						// Replace upper part with conservation relations
-						mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
-
-						unsigned int bndIdx = 0;
-						unsigned int rIdx = 0;
-						unsigned int bIdx = 0;
-						for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+						if (!mask.mask[comp])
 						{
-							if (!mask.mask[comp])
-							{
-								bndIdx += _disc.nBound[_disc.nComp * type + comp];
-								continue;
-							}
-
-							mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
-
-							for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
-							{
-								if (mask.mask[bndIdx])
-								{
-									mat.native(rIdx, bIdx + numActiveComp) = epsQ;
-									++bIdx;
-								}
-							}
-
-							++rIdx;
+							bndIdx += _disc.nBound[_disc.nComp * type + comp];
+							continue;
 						}
 
-						return true;
-					};
-				//}
+						mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
+
+						for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
+						{
+							if (mask.mask[bndIdx])
+							{
+								mat.native(rIdx, bIdx + numActiveComp) = epsQ;
+								++bIdx;
+							}
+						}
+
+						++rIdx;
+					}
+
+					return true;
+				};
+				//} // @todo AD
 
 				// Apply nonlinear solver
 				_nonlinearSolver->solve(
@@ -1892,8 +1906,8 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 				_binding[type]->postConsistentInitialState(simTime.t, simTime.secIdx, colPos, qShell, qShell - idxr.strideParLiquid(), tlmAlloc);
 			}
 
-			// reset particle jacobian
-			setParDispJacPattern(type, _jacPdisc[type * _disc.nPoints + pblk]);
+			// reset jacobian pattern
+			setJacobianPattern_GRM(_globalJacDisc, _disc.curSection);
 
 		} CADET_PARFOR_END;
 	}
@@ -1960,29 +1974,29 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 
 	Indexer idxr(_disc);
 
-	Eigen::Map<const VectorXd> y(vecStateY, numDofs());
-	Eigen::Map<VectorXd> yDot(vecStateYdot, numDofs());
-
 	// Step 2: Compute the correct time derivative of the state vector
 
 	// Step 2a: Assemble, factorize, and solve diagonal blocks of linear system
 
+	double* entries = _globalJacDisc.valuePtr();
+	for (unsigned int entry = 0; entry < _globalJacDisc.nonZeros(); entry++)
+		entries[entry] = 0.0;
+
+	Eigen::Map<VectorXd> yDot(vecStateYdot, numDofs());
+
 	// Note that the residual has not been negated, yet. We will do that now.
 	for (unsigned int i = 0; i < numDofs(); ++i)
 		vecStateYdot[i] = -vecStateYdot[i];
+	
+	// bulk column block: dc/dt = rhs = residual(with dc/dt=nullptr)
+	linalg::BandedEigenSparseRowIterator jacBlk(_globalJacDisc, idxr.offsetC());
+	for (unsigned int blk = 0; blk < _disc.nPoints * _disc.nComp; blk++, ++jacBlk)
+		jacBlk[0] = 1.0;
 
-	// Handle bulk column block
-	// Assemble
-	double* vPtr = _jacCdisc.valuePtr();
-	for (int k = 0; k < _jacCdisc.nonZeros(); k++) {
-		vPtr[k] = 0.0;
-	}
-	addTimeDerBulkJacobian(1.0, idxr);
-	// Factorize
-	_bulkSolver.factorize(_jacCdisc);
-
-	// Solve
-	yDot.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(yDot.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+	// set (film) flux dependency for now (needed to apply solver). Fluxes are computed afterwards.
+	linalg::BandedEigenSparseRowIterator jacFilm(_globalJacDisc, idxr.offsetJf());
+	for (unsigned int film = 0; film < _disc.nPoints * _disc.nComp * _disc.nParType; film++, ++jacFilm)
+		jacFilm[0] = 1.0;
 
 	// Process the particle blocks
 #ifdef CADET_PARALLELIZE
@@ -1992,52 +2006,47 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 	for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
 #endif
 	{
-		const unsigned int type = pblk / _disc.nPoints;
-		const unsigned int par = pblk % _disc.nPoints;
+		unsigned int type = pblk / _disc.nPoints;
+		unsigned int par = pblk % _disc.nPoints;
 
 		// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-		const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-			+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
+		const double z = (_disc.deltaZ * std::floor(par / _disc.nNodes)
+			+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[par % _disc.nNodes])) / _disc.colLength;
 
 		// Assemble
-		Eigen::SparseMatrix<double, RowMajor>& mat = _jacPdisc[type * _disc.nPoints + par];
-		double* vPtr = mat.valuePtr();
-		for (int k = 0; k < mat.nonZeros(); k++) {
-			vPtr[k] = 0.0;
-		}
-
-		linalg::BandedEigenSparseRowIterator jac(mat, 0);
+		linalg::BandedEigenSparseRowIterator jacPar(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }));
 
 		LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 		double* const dFluxDt = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
 
 		for (unsigned int j = 0; j < _disc.nParPoints[type]; ++j)
 		{
-			addTimeDerivativeToJacobianParticleShell(jac, idxr, 1.0, type);
-			// Iterator jac has already been advanced to next shell
+			addTimeDerivativeToJacobianParticleShell(jacPar, idxr, 1.0, type); // Iterator jacPar advances to next node
 
 			if (!_binding[type]->hasQuasiStationaryReactions())
 				continue;
 
 			// Get iterators to beginning of solid phase
-			linalg::BandedEigenSparseRowIterator jacSolidOrig(_jacP[pblk], j * static_cast<unsigned int>(idxr.strideParShell(type)) + static_cast<unsigned int>(idxr.strideParLiquid()));
-			linalg::BandedEigenSparseRowIterator jacSolid = jac - idxr.strideParBound(type);
+			linalg::BandedEigenSparseRowIterator jacSolidOrig(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) + j * static_cast<unsigned int>(idxr.strideParNode(type)) + static_cast<unsigned int>(idxr.strideParLiquid()));
+			linalg::BandedEigenSparseRowIterator jacSolid = jacPar - idxr.strideParBound(type);
 
 			int const* const mask = _binding[type]->reactionQuasiStationarity();
-			double* const qShellDot = vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) + static_cast<int>(j) * idxr.strideParShell(type) + idxr.strideParLiquid();
+			double* const qShellDot = vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) + static_cast<int>(j) * idxr.strideParNode(type) + idxr.strideParLiquid();
 
 			// Obtain derivative of fluxes wrt. time
 			std::fill_n(dFluxDt, _disc.strideBound[type], 0.0);
 			if (_binding[type]->dependsOnTime())
 			{
-				// r (particle) coordinate of current node
-				const double r = _disc.deltaR[type] * std::floor(par / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][par % _disc.nParNode[type]]);
+				// r (particle) coordinate of current node (particle radius normed to 1) - needed in externally dependent adsorption kinetic
+				const double r = (_disc.deltaR[type] * std::floor(j / _disc.nParNode[type])
+					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][j % _disc.nParNode[type]]))
+					/ (static_cast<double>(_parRadius[type]) - static_cast<double>(_parCoreRadius[type]));
 				_binding[type]->timeDerivativeQuasiStationaryFluxes(simTime.t, simTime.secIdx,
-					ColumnPosition{ z, 0.0, r}, qShellDot - _disc.nComp, qShellDot, dFluxDt, tlmAlloc);
+					ColumnPosition{ z, 0.0, r },
+					qShellDot - _disc.nComp, qShellDot, dFluxDt, tlmAlloc);
 			}
 
-			// Copy row from original Jacobian and set right hand side
+			// Copy row from original Jacobian (without time derivatives) and set right hand side
 			for (int i = 0; i < idxr.strideParBound(type); ++i, ++jacSolid, ++jacSolidOrig)
 			{
 				if (!mask[i])
@@ -2047,32 +2056,36 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 				qShellDot[i] = -dFluxDt[i];
 			}
 		}
-
-		// Factorize
-		_parSolver[type * _disc.nPoints + par].factorize(mat);
-		if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
-		{
-			LOG(Error) << "Factorize() failed for par block " << pblk << " (type " << type << " node " << par << ")\n" << mat;
-		}
-
-		// Solve
-		Eigen::Map<VectorXd> r(vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), static_cast<int>(_disc.nParPoints[type]) * idxr.strideParShell(type));
-		_parSolver[type * _disc.nPoints + par].solve(r);
-		if (_parSolver[type * _disc.nPoints + par].info() != Eigen::Success)
-		{
-			LOG(Error) << "Solve() failed for par block " << pblk << " (type " << type << " node " << par << ")";
-		}
 	} CADET_PARFOR_END;
 
 #ifdef CADET_PARALLELIZE
 	BENCH_STOP(_timerConsistentInitPar);
 #endif
 
+		// todo ? Precondition
+		//double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+		//fbm.rowScaleFactors(scaleFactors);
+		//fbm.scaleRows(scaleFactors);
+
+		// Factorize
+		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
+		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+		{
+			LOG(Error) << "Factorize() failed";
+		}
+
+		// Solve
+		yDot.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(yDot.segment(idxr.offsetC(), numPureDofs()));
+		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+		{
+			LOG(Error) << "Solve() failed";
+		}
+
 	// Step 2b: Solve for fluxes j_f by backward substitution
 
 	// Reset \dot{j}_f to 0.0
 	double* const jfDot = vecStateYdot + idxr.offsetJf();
-	std::fill(jfDot, jfDot + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
+	std::fill(jfDot, jfDot + _disc.nComp * _disc.nCol * _disc.nParType, 0.0);
 
 	solveForFluxes(vecStateYdot, idxr);
 }
@@ -2123,6 +2136,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
  */
 void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTime, double* const vecStateY, const AdJacobianParams& adJac, double errorTol, util::ThreadLocalStorage& threadLocalMem)
 {
+	// @todo
 	if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
 		LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
 
@@ -2148,13 +2162,13 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 
 				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
 				const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
+					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.colLength;
 
 				const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
 				for (std::size_t shell = 0; shell < static_cast<std::size_t>(_disc.nParPoints[type]); ++shell)
 				{
 					// Get pointer to q variables in a shell of particle pblk
-					const int localOffsetInParticle = static_cast<int>(shell) * idxr.strideParShell(type) + idxr.strideParLiquid();
+					const int localOffsetInParticle = static_cast<int>(shell) * idxr.strideParNode(type) + idxr.strideParLiquid();
 					double* const qShell = vecStateY + localOffsetToParticle + localOffsetInParticle;
 					// r (particle) coordinate of current node
 					const double r = _disc.deltaR[type] * std::floor(shell / _disc.nParNode[type])
@@ -2282,7 +2296,7 @@ void GeneralRateModelDG::initializeSensitivityStates(const std::vector<double*>&
 				// Loop over particle cells
 				for (unsigned int shell = 0; shell < _disc.nParPoints[type]; ++shell)
 				{
-					const unsigned int shellOffset = offset + shell * idxr.strideParShell(type);
+					const unsigned int shellOffset = offset + shell * idxr.strideParNode(type);
 					double* const stateYparticle = vecSensY[param] + shellOffset;
 					double* const stateYparticleSolid = stateYparticle + idxr.strideParLiquid();
 
@@ -2632,30 +2646,17 @@ void GeneralRateModelDG::leanConsistentInitialSensitivity(const SimulationTime& 
 	//}
 }
 
-/**
- * @brief Solves the algebraic flux equations for the fluxes @f$ j_f @f$
- * @details The equation to be solved is @f$ j_f - k_f * (c - c_p) == y @f$, where @f$ y @f$
- *          is a given vector.
- * @param [in,out] vecState On entry the state vector with @f$ y @f$ in its flux variables @f$ j_f @f$,
- *                 on exit the solution @f$ j_f. @f$
- * @param [in] idxr Indexer
- */
 void GeneralRateModelDG::solveForFluxes(double* const vecState, const Indexer& idxr) const
 {
 	// We have j_f - k_f * (c - c_p) == 0
 	// Thus, jacFC contains -k_f and jacFP +k_f.
 	// We just need to subtract both -k_f * c and k_f * c_p to get j_f == k_f * (c - c_p)
 
-	double* const jf = vecState + idxr.offsetJf();
+	Eigen::Map<Eigen::VectorXd> flux(reinterpret_cast<double* const>(vecState + idxr.offsetJf()), static_cast<int>(numDofs()) - idxr.offsetJf());
+	Eigen::Map<Eigen::VectorXd> pureState(reinterpret_cast<double* const>(vecState + idxr.offsetC()), idxr.offsetJf() - idxr.offsetC());
 
-	// Note that we cannot parallelize this loop since we are updating the fluxes in-place
-	_jacFC.multiplySubtract(vecState + idxr.offsetC(), jf);
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		linalg::DoubleSparseMatrix const* const jacFPtype = _jacFP + type * _disc.nPoints;
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-			jacFPtype[pblk].multiplySubtract(vecState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ pblk }), jf);
-	}
+	flux = -_globalJac.block(idxr.offsetJf(), idxr.offsetC(), static_cast<int>(numDofs()) - idxr.offsetJf(), idxr.offsetJf() - idxr.offsetC())
+		  * pureState;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
