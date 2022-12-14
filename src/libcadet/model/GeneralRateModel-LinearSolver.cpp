@@ -618,7 +618,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 
 		// Assemble and factorize discretized bulk Jacobian
 		assembleDiscretizedGlobalJacobian(alpha, idxr);
-
+		
 		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
 
 		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
@@ -686,18 +686,21 @@ void GeneralRateModelDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer
 				// move iterator to solid phase
 				jac += idxr.strideParLiquid();
 				// Solid phase
-				for (unsigned int bnd = 0; bnd < _disc.strideBound[parType]; ++bnd, ++jac)
-				{
-					// Add derivative with respect to dynamic states to Jacobian
-					if (_binding[parType]->reactionQuasiStationarity()[bnd])
-						continue;
+				for (unsigned int comp = 0; comp < _disc.nComp; ++comp) {
+					for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; ++bnd, ++jac)
+					{
+						// Add derivative with respect to dynamic states to Jacobian
+						if (_binding[parType]->reactionQuasiStationarity()[idxr.offsetBoundComp(ParticleTypeIndex{ parType }, ComponentIndex{ comp }) + bnd])
+							continue;
 
-					// surface diffusion + kinetic binding -> additional DG-discretized mass balance equation for solid
-					else if (_hasSurfaceDiffusion[parType]) // TODO: account for all bound states, only some might not be affected by surface diffusion!
-						continue;
+						// surface diffusion + kinetic binding -> additional DG-discretized mass balance equation for solid, for which the (inexact integration) discretization special case also holds
+						else if (_hasSurfaceDiffusion[parType]
+							&& static_cast<double>(getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], _disc.curSection)[_disc.nBoundBeforeType[parType] + getOffsetSurfDiff(parType, comp, bnd)]) != 0.0)
+							continue;
 
-					// Add derivative with respect to dq / dt to Jacobian
-					jac[0] += alpha;
+						// Add derivative with respect to dq / dt to Jacobian
+						jac[0] += alpha;
+					}
 				}
 			}
 			else { // else, treat boundary node "normally"
