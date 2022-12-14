@@ -150,6 +150,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	_disc.polyDeg = paramProvider.getInt("POLYDEG");
 	if (_disc.polyDeg < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
+	if (_disc.polyDeg < 3)
+		LOG(Warning) << "Polynomial degree > 2 in bulk discretization (cf. POLYDEG) is always recommended for performance reasons.";
 
 	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
@@ -215,8 +217,11 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	if (parExactInt.size() < _disc.nParType)
 	{
 		// Multiplex exact/inexact integration of particle elements to all particle types
-		for (unsigned int i = 0; i < _disc.nParType; ++i)
+		for (unsigned int i = 0; i < _disc.nParType; ++i) {
 			std::fill(_disc.parExactInt, _disc.parExactInt + _disc.nParType, parExactInt[0]);
+			if (!_disc.parExactInt[i])
+				LOG(Warning) << "Inexact integration method (cf. PAR_EXACT_INTEGRATION) in particles might add severe! stiffness to the system and disables consistent initialization!";
+		}
 	}
 	else
 		std::copy_n(parExactInt.begin(), _disc.nParType, _disc.parExactInt);
@@ -458,8 +463,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	_disc.velocity = static_cast<double>(_convDispOpB.currentVelocity()); // updated later on (section dependent)
 	_disc.curSection = -1;
 
-	_disc.length_ = paramProvider.getDouble("COL_LENGTH");
-	_disc.deltaZ = _disc.length_ / _disc.nCol;
+	_disc.colLength = paramProvider.getDouble("COL_LENGTH");
+	_disc.deltaZ = _disc.colLength / _disc.nCol;
 
 	// ==== Construct and configure binding model
 	clearBindingModels();
@@ -573,10 +578,6 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	_globalJac.resize(numDofs(), numDofs());
 	// pattern is set in configure(), after surface diffusion is read
 	 //FDJac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete
-
-	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
-	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
-	_globalSolver.analyzePattern(_globalJacDisc.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs()));
 
 	// Set whether analytic Jacobian is used
 	useAnalyticJacobian(analyticJac);
@@ -806,7 +807,11 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 	}
 
 	// jaobian pattern set after binding and particle surface diffusion are configured
-	setJacobianPattern_GRM(_globalJac, 0); // note that pattern for _globalJacDisc is copied from _globalJac
+	setJacobianPattern_GRM(_globalJac, 0);
+	_globalJacDisc = _globalJac;
+	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
+	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
+	_globalSolver.analyzePattern(_globalJacDisc.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs()));
 
 	return transportSuccess && parSurfDiffDepConfSuccess && bindingConfSuccess && dynReactionConfSuccess;
 }
@@ -1166,7 +1171,7 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	if (wantJac && _disc.newStaticJac) {
 
-		//// if surface diffusion parameter changes to zero in section transition, the pattern also changes (special case SurfDiff+kinetic binding)
+		//// if surface diffusion parameter changes to zero in section transition, the jacobian pattern also changes (special case SurfDiff+kinetic binding)
 		//// @TODO, does this ever happen? if so, also reset pattern.
 		// estimate new static (per section) jacobian
 		bool success = calcStaticAnaJacobian_GRM(secIdx);
@@ -1209,26 +1214,6 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 	{
 		res[i] = y[i];
 	}
-
-	// todo delete
-	//Eigen::Map<const VectorXd> y_(reinterpret_cast<const double*>(y), numDofs());
-	//Eigen::Map<VectorXd> res_(reinterpret_cast<double*>(res), numDofs());
-	//Indexer idxr(_disc);
-	//if(!yDot)
-	//	std::cout << "consistent initialization" << std::endl;
-	//std::cout << "y,  res" << std::endl;
-	//std::cout << "inlet + bulk" << std::endl;
-	//for (int i = 0; i < _disc.nComp * (1+_disc.nPoints); i++) {
-	//	std::cout << y_[i] << ",  " << res_[i] << std::endl;
-	//}
-	//std::cout << "particle" << std::endl;
-	//for (int i = idxr.offsetCp(); i < idxr.offsetJf(); i++) {
-	//	std::cout << y_[i] << ",  " << res_[i] << std::endl;
-	//}
-	//std::cout << "flux" << std::endl;
-	//for (int i = idxr.offsetJf(); i < numDofs(); i++) {
-	//	std::cout << y_[i] << ",  " << res_[i] << std::endl;
-	//}
 
 	return 0;
 }
@@ -1307,7 +1292,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 
 	// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
 	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
-		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.length_;
+		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.colLength;
 
 	// The RowIterator is always centered on the main diagonal.
 	// This means that jac[0] is the main diagonal, jac[-1] is the first lower diagonal,
