@@ -396,15 +396,14 @@ protected:
 				parInvMM_Leg[parType].setZero();
 			}
 
-			Dr = new MatrixXd[offsetMetric.sum() + nParCell[0]];
-			Ir = new VectorXd[offsetMetric.sum() + nParCell[0]];
-			minus_InvMM_ST = new MatrixXd[offsetMetric.sum() + nParCell[0]];
-			parInvMM = new MatrixXd[offsetMetric.sum() + nParCell[0]];
-
-			offsetMetric = VectorXi::Zero(nParType);
-			for (int parType = 1; parType < nParType; parType++) {
+			offsetMetric = VectorXi::Zero(nParType + 1);
+			for (int parType = 1; parType <= nParType; parType++) {
 				offsetMetric[parType] += nParCell[parType - 1];
 			}
+			Dr = new MatrixXd[offsetMetric[nParType]];
+			Ir = new VectorXd[offsetMetric[nParType]];
+			minus_InvMM_ST = new MatrixXd[offsetMetric[nParType]];
+			parInvMM = new MatrixXd[offsetMetric[nParType]];
 
 			/* compute metric independent DG operators for bulk and particles. Note that metric dependent DG operators are computet in updateRadialDisc(). */
 
@@ -664,7 +663,7 @@ protected:
 	bool _analyticJac; //!< Determines whether AD or analytic Jacobians are used
 	unsigned int _jacobianAdDirs; //!< Number of AD seed vectors required for Jacobian computation
 
-	std::vector<active> _parCellSize; //!< Particle node / shell size
+	std::vector<active> _parCellSize; //!< Particle shell size
 	std::vector<active> _parCenterRadius; //!< Particle node-centered position for each particle node
 	std::vector<active> _parOuterSurfAreaPerVolume; //!< Particle shell outer sphere surface to volume ratio
 	std::vector<active> _parInnerSurfAreaPerVolume; //!< Particle shell inner sphere surface to volume ratio
@@ -835,10 +834,16 @@ protected:
 		*/
 		virtual void particleCoordinates(unsigned int parType, double* coords) const
 		{
-			// Note that the DG particle nodes are oppositely ordered compared to the FV particle cells
-			for (unsigned int par = 0; par < _disc.nParPoints[parType]; par++)
-				coords[par] = _disc.deltaR[parType] * std::floor(par / _disc.nParNode[parType])
-				+ 0.5 * _disc.deltaR[parType] * (1.0 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);;
+			active const* const pcr = _model._parCenterRadius.data() + _disc.offsetMetric[parType];
+
+			// Note that the DG particle shells are oppositely ordered compared to the FV particle shells
+			for (unsigned int par = 0; par < _disc.nParPoints[parType]; par++) {
+
+				unsigned int cell = std::floor(par / _disc.nParNode[parType]);
+
+				double r_L = static_cast<double>(pcr[cell]) - 0.5 * _disc.deltaR[_disc.offsetMetric[parType] + cell];
+				coords[par] = r_L + 0.5 * _disc.deltaR[_disc.offsetMetric[parType] + cell] * (1.0 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);
+			}
 		}
 
 	protected:
@@ -881,6 +886,12 @@ protected:
 // ===========================================================================================================================================================  //
 // ========================================			DG functions to compute the discretization			======================================================  //
 // ===========================================================================================================================================================  //
+
+	void applyParInvMap(VectorXd& state, unsigned int parType) {
+		for (int cell = 0; cell < _disc.nParCell[parType]; cell++) {
+			state.segment(cell * _disc.nParNode[parType], _disc.nParNode[parType]) *= 2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell] * 2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
+		}
+	}
 
 	/**
 	* @brief calculates the volume Integral of the auxiliary equation
@@ -1011,7 +1022,7 @@ protected:
 			// film diffusion BC
 			_disc.surfaceFluxParticle[parType][_disc.nParCell[parType]] = _disc.localFlux[comp]
 					/ (static_cast<double>(_parPorosity[parType]) * static_cast<double>(_poreAccessFactor[parType * _disc.nComp + comp]))
-				* (2.0 / _disc.deltaR[parType]); // inverse squared mapping is also applied, so we apply Map * invMap^2 = invMap
+				* (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]); // inverse squared mapping is also applied, so we apply Map * invMap^2 = invMap
 
 			// inner particle BC
 			_disc.surfaceFluxParticle[parType][0] = 0.0;
@@ -2189,12 +2200,13 @@ protected:
 
 		// blocks to compute jacobian
 		Eigen::MatrixXd dispBlock;
-		double invMap = (2.0 / _disc.deltaR[parType]);
 		Eigen::MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
 		B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
 
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
+
+			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]);
 
 			// B (lifting) matrix depends on metrics
 			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
@@ -2545,12 +2557,13 @@ protected:
 
 		// blocks to compute jacobian
 		Eigen::MatrixXd dispBlock;
-		double invMap = (2.0 / _disc.deltaR[parType]);
 		Eigen::MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
 		B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
 
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
+
+			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]);
 
 			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
 				dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
@@ -2642,6 +2655,7 @@ protected:
 			bnd_gStarDC *= 0.5;
 
 			/*			 left boundary cell				*/
+			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]);
 
 			// "standard" computation for slab-shaped particles and spherical, cylindrical particles without core
 			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0) {
@@ -2716,6 +2730,7 @@ protected:
 			}
 
 			/*			 right boundary cell				*/
+			invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + _disc.nParCell[parType] - 1]);
 
 			// numerical flux contribution for left interface of right boundary cell -> d f^*_0 / d cp
 			bnd_gStarDC.setZero();
@@ -2796,6 +2811,8 @@ protected:
 			dispBlock *= invMap * invMap;
 
 			for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
+				double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell]);
+
 				// add metric part, dependent on current cell
 				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock * invMap * invMap;
 
@@ -2870,12 +2887,13 @@ protected:
 
 		// blocks to compute jacobian
 		Eigen::MatrixXd dispBlock;
-		double invMap = (2.0 / _disc.deltaR[parType]);
 		Eigen::MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
 		B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
 
 		// special case: one cell -> diffBlock \in R^(nParNodes x nParNodes), GBlock = parPolyDerM
 		if (_disc.nParCell[parType] == 1) {
+
+			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]);
 
 			if (_disc.parExactInt[parType]) {
 				// B (lifting) matrix depends on metrics
@@ -2953,6 +2971,8 @@ protected:
 
 			/*			 left boundary cell				*/
 			int _cell = 0;
+			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + _cell]);
+
 			if (_disc.parExactInt[parType]) {
 				_disc.nParCell[parType] == 2 ? bnd_dispBlock = parSpecialBlockTwoCells(parType, false).block(0, nNodes + 1, nNodes, 2 * nNodes)
 											 : bnd_dispBlock = parLeftBndryCellBlock(parType).block(0, nNodes + 1, nNodes, 2 * nNodes);
@@ -3013,6 +3033,8 @@ protected:
 
 			/*			 right boundary cell				*/
 			_cell = _disc.nParCell[parType] - 1;
+			invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + _cell]);
+
 			if (_disc.parExactInt[parType]) {
 				_disc.nParCell[parType] == 2 ? bnd_dispBlock = parSpecialBlockTwoCells(parType, true).block(0, 1, nNodes, 2 * nNodes)
 											 : bnd_dispBlock = parRightBndryCellBlock(parType).block(0, 1, nNodes, 2 * nNodes);
@@ -3082,6 +3104,7 @@ protected:
 				}
 			}
 			else {
+
 				// auxiliary block [ d g(c) / d c ] for inner cells
 				MatrixXd GBlock = MatrixXd::Zero(nNodes, nNodes + 2);
 				GBlock.block(0, 1, nNodes, nNodes) = _disc.parPolyDerM[parType];
@@ -3102,11 +3125,13 @@ protected:
 				// dispersion block part without metrics
 				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = -1.0 * _disc.parInvWeights[parType].asDiagonal() * B * GBlock;
 				dispBlock.block(0, 0, nNodes, 3 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * gStarDC;
-				dispBlock *= invMap * invMap;
 
 				for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
+
 					// add metric part, dependent on current cell
-					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock * invMap * invMap;
+					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
+					invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell]);
+					dispBlock *= invMap * invMap;
 
 					for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
 
@@ -3126,7 +3151,8 @@ protected:
 					}
 
 					// substract metric part in preparation of next iteration
-					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) -= _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock * invMap * invMap;
+					dispBlock /= invMap * invMap;
+					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) -= _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
 				}
 			}
 		} // if nCells > 1
@@ -3337,7 +3363,7 @@ protected:
 		return gBlock;
 	}
 
-	Eigen::MatrixXd getParGBlock(int parType) {
+	Eigen::MatrixXd getParGBlock(int parType, int cell) {
 
 		int nNodes = _disc.nParNode[parType];
 		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
@@ -3347,7 +3373,7 @@ protected:
 		gBlock.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
 		gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
 		gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		gBlock *= 2 / _disc.deltaR[parType];
+		gBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return gBlock;
 	}
@@ -3412,7 +3438,7 @@ protected:
 
 		int nNodes = _disc.nParNode[parType];
 		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, cell);
 
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, cell);
@@ -3441,7 +3467,7 @@ protected:
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
 		}
-		dispBlock *= 2 / _disc.deltaR[parType];
+		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return dispBlock;
 	}
@@ -3478,13 +3504,13 @@ protected:
 
 		int cell = 1;
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, cell);
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
 		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[parType];
+		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
@@ -3504,7 +3530,7 @@ protected:
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
 		}
-		dispBlock *= 2 / _disc.deltaR[parType];
+		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return dispBlock;
 	}
@@ -3541,13 +3567,13 @@ protected:
 
 		int cell = _disc.nParCell[parType] - 2;
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, cell);
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
 		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[parType];
+		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
@@ -3567,7 +3593,7 @@ protected:
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
 		}
-		dispBlock *= 2 / _disc.deltaR[parType];
+		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return dispBlock;
 	}
@@ -3602,13 +3628,13 @@ protected:
 
 		int cell = 0;
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, cell);
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
 		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[parType];
+		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
@@ -3628,7 +3654,7 @@ protected:
 			dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[parType] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
 		}
 
-		dispBlock *= 2 / _disc.deltaR[parType];
+		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return dispBlock;
 	}
@@ -3663,13 +3689,13 @@ protected:
 
 		int cell = _disc.nParCell[parType] - 1;
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, cell);
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
 		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[parType];
+		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
@@ -3687,7 +3713,7 @@ protected:
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[parType] * B * GBlockBound_r;
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
 		}
-		dispBlock *= 2 / _disc.deltaR[parType];
+		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 
 		return dispBlock;
 	}
@@ -3784,20 +3810,19 @@ protected:
 	Eigen::MatrixXd parSpecialBlockTwoCells(int parType, bool right) {
 
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType); // standard auxiliary block
 		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);// Dispersion block [ d RHS_disp / d c ]
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
 		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[parType];
+		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 0];
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
 		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[parType];
+		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
 		
 		if (right) { // right boundary cell
 			int cell = 1;
@@ -3810,12 +3835,12 @@ protected:
 			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
 				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
 				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[parType];
+				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 			}
 			else {
 				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * GBlockBound_r;
 				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[parType];
+				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 			}
 
 			return dispBlock;
@@ -3831,12 +3856,12 @@ protected:
 			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
 				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
 				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[parType];
+				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 			}
 			else {
 				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_l - _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * GBlockBound_l;
 				dispBlock += _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[parType];
+				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
 			}
 
 			return dispBlock;
@@ -3881,7 +3906,7 @@ protected:
 	Eigen::MatrixXd parSpecialBlockThreeCells(int parType) {
 
 		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType);
+		MatrixXd gBlock = getParGBlock(parType, 1);
 		// B matrix from DG scheme
 		MatrixXd B = getParBMatrix(nNodes, parType, 1);
 		// boundary auxiliary block [ d g(c) / d c ]
@@ -3889,13 +3914,13 @@ protected:
 		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
 		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[parType];
+		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 0];
 		// boundary auxiliary block [ d g(c) / d c ]
 		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
 		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
 		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
 		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[parType];
+		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 2];
 		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
 		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
@@ -3909,12 +3934,12 @@ protected:
 		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + 1] * gBlock;
 			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + 1] * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[parType];
+			dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
 		}
 		else {
 			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
 			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[parType];
+			dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
 		}
 
 		return dispBlock;
@@ -4286,7 +4311,7 @@ protected:
 						// row: already at particle. already at current node and liquid state.
 						// col: go to flux of current parType. jump over previous colNodes and add component offset
 						jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
-							= -2.0 / _disc.deltaR[type] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+							= -2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 					}
 					else {
 						for (int node = _disc.parPolyDeg[type]; node >= 0; node--, jacCpF -= idxr.strideParNode(type)) {
@@ -4294,7 +4319,7 @@ protected:
 							// col: go to flux of current parType. jump over previous colNodes and add component offset
 							jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - jacCpF.row() + colNode * _disc.nComp + comp]
 								// note: _disc.Ir[type][_disc.nParNode[type] - 1] is lifting matrix contribution
-							= - 2.0 / _disc.deltaR[type] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+							= - 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						}
 						// set back iterator to first node as required by component loop
 						jacCpF += _disc.nParNode[type] * idxr.strideParNode(type);
