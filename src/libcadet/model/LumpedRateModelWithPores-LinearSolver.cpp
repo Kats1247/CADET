@@ -575,25 +575,13 @@ void LumpedRateModelWithPores<ConvDispOperator>::addTimeDerivativeToJacobianPart
 						&   &        &   & S
 				\end{array}\right].
 			\end{align} @f]
- *          Here, the Schur-complement @f$ S @f$ is given by
- *          @f[ \begin{align}
-				S = J_f - J_{f,0} \, J_0^{-1} \, J_{0,f} - \sum_{p=1}^{N_z}{J_{f,p} \, J_p^{-1} \, J_{p,f}}.
-			\end{align} @f]
  *          Note that @f$ J_f = I @f$ is the identity matrix and that the off-diagonal blocks @f$ J_{i,f} @f$
  *          and @f$ J_{f,i} @f$ for @f$ i = 0, \dots, N_{z} @f$ are sparse.
  *
- *          Exploiting the decomposition, the solution procedure @f$ x = J^{-1}b = \left( LU \right)^{-1}b = U^{-1} L^{-1} b @f$
- *          works as follows:
- *              -# Factorize the diagonal blocks @f$ J_0, \dots, J_{N_z} @f$
- *              -# Solve @f$ y = L^{-1} b @f$ by forward substitution. This is accomplished by first solving the diagonal
- *                 blocks independently, that is,
- *                 @f[ y_i = J_{i}^{-1} b_i. @f]
- *                 Then, calculate the flux-part @f$ y_f @f$ by substituting in the already calculated solutions @f$ y_i @f$:
- *                 @f[ y_f = b_f - \sum_{i=0}^{N_z} J_{f,i} y_i. @f]
- *              -# Solve the Schur-complement @f$ S x_f = y_f @f$ using an iterative method that only requires
- *                 matrix-vector products. The already inverted diagonal blocks @f$ J_i^{-1} @f$ come in handy here.
- *              -# Solve the rest of the @f$ U x = y @f$ system by backward substitution. To be more precise, compute
- *                 @f[ x_i = y_i - J_i^{-1} J_{i,f} y_f. @f]
+ *          The solution procedure works as follows:
+ *              -# Factorize the global jacobian
+ *              -# Solve the system via a direct LU solver (Eigen3 lib)
+ *				-# Inlet DOFs are treated separately since they are only coupled with first DG element
  *
  *
  * @param [in] t Current time point
@@ -613,44 +601,36 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 
 	Eigen::Map<VectorXd> r(rhs, numDofs()); // map rhs to Eigen object
 
-	// ==== Step 1: Factorize diagonal Jacobian blocks
+	// ==== Step 1: Factorize global Jacobian (without inlet DOFs)
 
 	// Factorize partial Jacobians only if required
-
-
 	if (_factorizeJacobian)
 	{
 
 		// Assemble and factorize discretized bulk Jacobian
-		assembleDiscretizedBulkJacobian(alpha, idxr);
+		assembleDiscretizedGlobalJacobian(alpha, idxr);
 
-		_bulkSolver.factorize(_jacCdisc);
+		_globalSolver.factorize(_globalJacDisc);
 		//_bulkSolver.compute(_jacCdisc);
 
-		if (cadet_unlikely(_bulkSolver.info() != Eigen::Success)) {
-			LOG(Error) << "Factorize() failed for bulk block";
+		if (cadet_unlikely(_globalSolver.info() != Eigen::Success)) {
+			LOG(Error) << "Factorize() failed";
 		}
 
-
-		// Process the particle blocks
-
-		for (unsigned int type = 0; type < _disc.nParType; ++type)
-		{
-			// Assemble
-			assembleDiscretizedJacobianParticleBlock(type, alpha, idxr);
-			
-			// Factorize
-			const bool result = _jacPdisc[type].factorize();
-			if (cadet_unlikely(!result))
-			{
-				LOG(Error) << "Factorize() failed for par type block " << type;
-			}
-		}
 		// Do not factorize again at next call without changed Jacobians
 		_factorizeJacobian = false;
 	} // if (_factorizeJacobian)
 
-
+	//if (_globalJacDisc.toDense().isApprox(_FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()), 1e-12)) {
+	//	std::cout << "jacobian correct" << std::endl;
+	//}
+	//else {
+	//	std::cout << "ana. inlet:\n" << std::fixed << std::setprecision(3) << _jacInlet << std::endl;
+	//	std::cout << "FD inlet:\n" << _FDjac.block(0, 0, _disc.nComp + idxr.strideColCell(), _disc.nComp) << std::endl;
+	//	std::cout << "ana. Jac:\n" << _globalJacDisc.toDense() << std::endl;
+	//	std::cout << "FD Jac:\n" << _FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()) << std::endl;
+	//	std::cout << "jacobian incorrect" << std::endl;
+	//}
 
 	// ====== Step 1.5: Solve J c_uo = b_uo - A * c_in = b_uo - A*b_in
 
@@ -663,189 +643,17 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 		}
 	}
 
-	// ==== Step 2: Solve diagonal Jacobian blocks J_i to get y_i = J_i^{-1} b_i
+	// ==== Step 2: Solve system of pure DOFs
 	// The result is stored in rhs (in-place solution)
 
-	// Threads that are done with solving the bulk column blocks can proceed
-	// to solving the particle blocks
+	r.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(r.segment(idxr.offsetC(), numPureDofs()));
 
-	r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
-
-	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
+	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
 	{
-		LOG(Error) << "Solve() failed for bulk block";
-	}
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		const bool result = _jacPdisc[type].solve(rhs + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }));
-		if (cadet_unlikely(!result))
-		{
-			LOG(Error) << "Solve() failed for par type block " << type;
-		}
-	}
-
-	// Solve last row of L with backwards substitution: y_f = b_f - \sum_{i=0}^{N_z} J_{f,i} y_i
-	// Note that we cannot easily parallelize this loop since the results of the sparse
-	// matrix-vector multiplications are added in-place to rhs. We would need one copy of rhs
-	// for each thread and later fuse them together (reduction statement).
-
-	_jacFC.multiplySubtract(rhs + idxr.offsetC(), rhs + idxr.offsetJf());
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-		_jacFP[type].multiplySubtract(rhs + idxr.offsetCp(ParticleTypeIndex{ type }), rhs + idxr.offsetJf());
-
-	// Now, rhs contains the full intermediate solution y = L^{-1} b
-
-	// Initialize temporary storage by copying over the fluxes
-	// Note that the rest of _tempState is zeroed out in schurComplementMatrixVector()
-	std::copy(rhs + idxr.offsetJf(), rhs + numDofs(), _tempState + idxr.offsetJf());
-	Eigen::Map<VectorXd> _tmpState(_tempState, numDofs());
-
-	// ==== Step 3: Solve Schur-complement to get x_f = S^{-1} y_f
-	// Column and particle parts remain unchanged.
-	// The only thing to be done is the iterative (and approximate)
-	// solution of the Schur complement system:
-	//     S * x_f = y_f
-
-	// Note that rhs is updated in-place with the solution of the Schur-complement
-	// The temporary storage is only needed to hold the right hand side of the Schur-complement
-	const double tolerance = std::sqrt(static_cast<double>(numDofs())) * outerTol * _schurSafety;
-
-	BENCH_START(_timerGmres);
-	_gmres.solve(tolerance, weight + idxr.offsetJf(), _tempState + idxr.offsetJf(), rhs + idxr.offsetJf());
-	BENCH_STOP(_timerGmres);
-
-	// Remove temporary results that are leftovers from schurComplementMatrixVector()
-	std::fill(_tempState + idxr.offsetC(), _tempState + idxr.offsetJf(), 0.0);
-
-	// At this point, rhs contains the intermediate solution [y_0, ..., y_{N_z}, x_f]
-
-	// ==== Step 4: Solve U * x = y by backward substitution
-	// The fluxes are already solved and remain unchanged
-
-	// Compute tempState_0 = J_{0,f} * y_f
-	_jacCF.multiplyAdd(rhs + idxr.offsetJf(), _tempState + idxr.offsetC());
-
-
-	// Threads that are done with solving the bulk column blocks can proceed
-	// to solving the particle blocks
-
-	double* const localCol = _tempState + idxr.offsetC();
-	double* const rhsCol = rhs + idxr.offsetC();
-
-	// Apply J_0^{-1} to tempState_0
-	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
-
-	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
-	{
-		LOG(Error) << "Solve() failed for bulk block";
-	}
-
-	for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
-		rhsCol[i] -= localCol[i];
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		double* const localPar = _tempState + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) });
-		double* const rhsPar = rhs + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) });
-
-		// Compute tempState_i = J_{i,f} * y_f
-		_jacPF[type].multiplyAdd(rhs + idxr.offsetJf(), localPar);
-		// Apply J_i^{-1} to tempState_i
-		const bool result = _jacPdisc[type].solve(localPar);
-		if (cadet_unlikely(!result))
-		{
-			LOG(Error) << "Solve() failed for par type block " << type;
-		}
-
-		// Compute rhs_i = y_i - J_i^{-1} * J_{i,f} * y_f = y_i - tempState_i
-		for (unsigned int i = 0; i < idxr.strideParBlock(type) * _disc.nPoints; ++i)
-			rhsPar[i] -= localPar[i];
+		LOG(Error) << "Solve() failed";
 	}
 
 	// The full solution is now stored in rhs
-	return 0;
-}
-
-/**
- * @brief Performs the matrix-vector product @f$ z = Sx @f$ with the Schur-complement @f$ S @f$ from the Jacobian
- * @details The Schur-complement @f$ S @f$ is given by
- *          @f[ \begin{align}
-				S &= J_f - J_{f,0} \, J_0^{-1} \, J_{0,f} - \sum_{p=1}^{N_z}{J_{f,p} \, J_p^{-1} \, J_{p,f}} \\
-				  &= I - \sum_{p=0}^{N_z}{J_{f,p} \, J_p^{-1} \, J_{p,f}},
-			\end{align} @f]
- *          where @f$ J_f = I @f$ is the identity matrix and the off-diagonal blocks @f$ J_{i,f} @f$
- *          and @f$ J_{f,i} @f$ for @f$ i = 0, \dots, N_{z} @f$ are sparse.
- *
- *          The matrix-vector multiplication is executed in parallel as follows:
- *              -# Compute @f$ J_{f,i} \, J_i^{-1} \, J_{i,f} @f$ independently (in parallel with respect to index @f$ i @f$)
- *              -# Subtract the result from @f$ z @f$
- *
- * @param [in] x Vector @f$ x @f$ the matrix @f$ S @f$ is multiplied with
- * @param [out] z Result of the matrix-vector multiplication
- * @return @c 0 if successful, any other value in case of failure
- */
-int LumpedRateModelWithPoresDG::schurComplementMatrixVector(double const* x, double* z) const
-{
-	BENCH_SCOPE(_timerMatVec);
-
-	// Copy x over to result z, which corresponds to the application of the identity matrix
-	std::copy(x, x + _disc.nPoints * _disc.nComp * _disc.nParType, z);
-
-	Indexer idxr(_disc);
-	std::fill(_tempState + idxr.offsetC(), _tempState + idxr.offsetJf(), 0.0);
-	Eigen::Map<VectorXd> _tmpState(_tempState, numDofs());
-
-
-
-	// Solve bulk column blocks first
-
-	// Apply J_{0,f}
-	_jacCF.multiplyAdd(x, _tempState + idxr.offsetC());
-
-
-	// Apply J_0^{-1}
-	//_bulkSolver.factorize(_jacCdisc); // already factorized !
-	_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
-
-	if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
-	{
-		LOG(Error) << "Solve() failed for bulk block";
-	}
-
-
-
-	// Handle particle blocks
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-
-	{
-		// Get this thread's temporary memory block
-		double* const tmp = _tempState + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) });
-
-		// Apply J_{i,f}
-		_jacPF[type].multiplyAdd(x, tmp);
-		// Apply J_{i}^{-1}
-		const bool result = _jacPdisc[type].solve(tmp);
-
-		if (cadet_unlikely(!result))
-		{
-			LOG(Error) << "Solve() failed for par type block " << type;
-		}
-	}
-
-
-	// Apply J_{f,0} and subtract results from z
-	_jacFC.multiplySubtract(_tempState + idxr.offsetC(), z);
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		// Apply J_{f,i} and subtract results from z
-		_jacFP[type].multiplySubtract(_tempState + idxr.offsetCp(ParticleTypeIndex{ type }), z);
-	}
-
-
-
 	return 0;
 }
 
@@ -864,53 +672,30 @@ int LumpedRateModelWithPoresDG::schurComplementMatrixVector(double const* x, dou
  *
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  */
-void LumpedRateModelWithPoresDG::assembleDiscretizedBulkJacobian(double alpha, Indexer idxr) {
+void LumpedRateModelWithPoresDG::assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr) {
 
-	double* vPtr = _jacCdisc.valuePtr();
-	for (int k = 0; k < _jacCdisc.nonZeros(); k++) {
+	double* vPtr = _globalJacDisc.valuePtr();
+	for (int k = 0; k < _globalJacDisc.nonZeros(); k++) {
 		*vPtr = 0.0;
 		vPtr++;
 	}
 
 	// add time derivative to bulk jacobian
 	addTimeDerBulkJacobian(alpha, idxr);
-	// add static (per section) jacobian
-	_jacCdisc += _jacC;
-
-}
-
-/**
- * @brief Assembles a particle Jacobian block @f$ J_i @f$ (@f$ i > 0 @f$) of the time-discretized equations
- * @details The system \f[ \left( \frac{\partial F}{\partial y} + \alpha \frac{\partial F}{\partial \dot{y}} \right) x = b \f]
- *          has to be solved. The system Jacobian of the original equations,
- *          \f[ \frac{\partial F}{\partial y}, \f]
- *          is already computed (by AD or manually in residualImpl() with @c wantJac = true). This function is responsible
- *          for adding
- *          \f[ \alpha \frac{\partial F}{\partial \dot{y}} \f]
- *          to the system Jacobian, which yields the Jacobian of the time-discretized equations
- *          \f[ F\left(t, y_0, \sum_{k=0}^N \alpha_k y_k \right) = 0 \f]
- *          when a BDF method is used. The time integrator needs to solve this equation for @f$ y_0 @f$, which requires
- *          the solution of the linear system mentioned above (@f$ \alpha_0 = \alpha @f$ given in @p alpha).
- *
- * @param [in] parType Index of the particle type block
- * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
- * @param [in] idxr Indexer
- */
-void LumpedRateModelWithPoresDG::assembleDiscretizedJacobianParticleBlock(unsigned int parType, double alpha, const Indexer& idxr)
-{
-	linalg::FactorizableBandMatrix& fbm = _jacPdisc[parType];
-	const linalg::BandMatrix& bm = _jacP[parType];
-
-	// Copy normal matrix over to factorizable matrix
-	fbm.copyOver(bm);
 
 	// Add time derivatives to particle shells
-	linalg::FactorizableBandMatrix::RowIterator jac = fbm.row(0);
-	for (unsigned int j = 0; j < _disc.nPoints; ++j)
-	{
-		// Mobile and solid phase (advances jac accordingly)
-		addTimeDerivativeToJacobianParticleBlock(jac, idxr, alpha, parType);
+	for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
+		linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ parType }) - idxr.offsetC());
+		for (unsigned int j = 0; j < _disc.nPoints; ++j)
+		{
+			// Mobile and solid phase (advances jac accordingly)
+			addTimeDerivativeToJacobianParticleBlock(jac, idxr, alpha, parType);
+		}
 	}
+
+	// add static (per section) jacobian
+	_globalJacDisc += _globalJac;
+
 }
 
 /**
@@ -923,7 +708,7 @@ void LumpedRateModelWithPoresDG::assembleDiscretizedJacobianParticleBlock(unsign
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  * @param [in] parType Index of the particle type
  */
-void LumpedRateModelWithPoresDG::addTimeDerivativeToJacobianParticleBlock(linalg::FactorizableBandMatrix::RowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
+void LumpedRateModelWithPoresDG::addTimeDerivativeToJacobianParticleBlock(linalg::BandedEigenSparseRowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
 {
 	// Mobile phase
 	for (int comp = 0; comp < static_cast<int>(_disc.nComp); ++comp, ++jac)

@@ -53,15 +53,8 @@ constexpr double SurfVolRatioCylinder = 2.0;
 constexpr double SurfVolRatioSlab = 1.0;
 
 
-int schurComplementMultiplierLRMPoresDG(void* userData, double const* x, double* z)
-{
-	LumpedRateModelWithPoresDG* const lrm = static_cast<LumpedRateModelWithPoresDG*>(userData);
-	return lrm->schurComplementMatrixVector(x, z);
-}
-
-
 LumpedRateModelWithPoresDG::LumpedRateModelWithPoresDG(UnitOpIdx unitOpIdx) : UnitOperationBase(unitOpIdx),
-_dynReactionBulk(nullptr), _jacP(0), _jacPdisc(0), _jacPF(0), _jacFP(0), _jacInlet(), _analyticJac(true),
+_dynReactionBulk(nullptr), _globalJac(), _jacInlet(), _analyticJac(true),
 _jacobianAdDirs(0), _factorizeJacobian(false), _tempState(nullptr), _initC(0), _initCp(0), _initQ(0),
 _initState(0), _initStateDot(0)
 {
@@ -198,11 +191,6 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	const bool analyticJac = false;
 #endif
 
-	// Initialize and configure GMRES for solving the Schur-complement
-	_gmres.initialize(_disc.nPoints * _disc.nComp * _disc.nParType, paramProvider.getInt("MAX_KRYLOV"), linalg::toOrthogonalization(paramProvider.getInt("GS_TYPE")), paramProvider.getInt("MAX_RESTARTS"));
-	_gmres.matrixVectorMultiplier(&schurComplementMultiplierLRMPoresDG, this);
-	_schurSafety = paramProvider.getDouble("SCHUR_SAFETY");
-
 	// Allocate space for initial conditions
 	_initC.resize(_disc.nComp);
 	_initCp.resize(_disc.nComp * _disc.nParType);
@@ -256,33 +244,14 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
 	else
 		_jacInlet.resize(1, 1); // first cell depends on inlet concentration (same for every component)
-	_jacC.resize(_disc.nComp * _disc.nPoints, _disc.nComp *  _disc.nPoints);
-	_jacCdisc.resize(_disc.nComp * _disc.nPoints, _disc.nComp * _disc.nPoints);
-	setConvDispJacPattern(_jacC);
-	setConvDispJacPattern(_jacCdisc);
+	_globalJac.resize(numPureDofs(), numPureDofs());
+	_globalJacDisc.resize(numPureDofs(), numPureDofs());
+	setGlobalJacPattern(_globalJac);
+	_globalJacDisc = _globalJac;
 
 	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
 	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
-	_bulkSolver.analyzePattern(_jacCdisc);
-
-	_jacP.resize(_disc.nParType);
-	_jacPdisc.resize(_disc.nParType);
-	for (unsigned int i = 0; i < _disc.nParType; ++i)
-	{
-		_jacPdisc[i].resize(_disc.nPoints * (_disc.nComp + _disc.strideBound[i]), _disc.nComp + _disc.strideBound[i] - 1, _disc.nComp + _disc.strideBound[i] - 1);
-		_jacP[i].resize(_disc.nPoints * (_disc.nComp + _disc.strideBound[i]), _disc.nComp + _disc.strideBound[i] - 1, _disc.nComp + _disc.strideBound[i] - 1);
-	}
-
-	_jacPF.resize(_disc.nParType);
-	_jacFP.resize(_disc.nParType);
-	for (unsigned int i = 0; i < _disc.nParType; ++i)
-	{
-		_jacPF[i].resize(_disc.nComp * _disc.nPoints);
-		_jacFP[i].resize(_disc.nComp * _disc.nPoints);
-	}
-
-	_jacCF.resize(_disc.nComp * _disc.nPoints* _disc.nParType);
-	_jacFC.resize(_disc.nComp * _disc.nPoints* _disc.nParType);
+	_globalSolver.analyzePattern(_globalJacDisc);
 
 	// Set whether analytic Jacobian is used
 	useAnalyticJacobian(analyticJac);
@@ -803,6 +772,8 @@ int LumpedRateModelWithPoresDG::residualWithJacobian(const SimulationTime& simTi
 {
 	BENCH_SCOPE(_timerResidual);
 
+	//_FDjac = calcFDJacobian(simTime, threadLocalMem, 2.0); //todo delete
+
 	// Evaluate residual, use AD for Jacobian if required but do not evaluate parameter derivatives
 	return residual(simTime, simState, res, adJac, threadLocalMem, true, false);
 }
@@ -918,12 +889,9 @@ int LumpedRateModelWithPoresDG::residualImpl(double t, unsigned int secIdx, Stat
 	
 	if (wantJac)
 	{
-		for (unsigned int type = 0; type < _disc.nParType; ++type)
-			_jacP[type].setAll(0.0);// Reset particle Jacobian
-
 		if (_disc.newStaticJac) { // ConvDisp static (per section) jacobian
 
-			success = calcStaticAnaBulkJacobian(t, secIdx, reinterpret_cast<const double*>(y), threadLocalMem);
+			success = calcStaticAnaGlobalJacobian(secIdx);
 			_disc.newStaticJac = false;
 			if (cadet_unlikely(!success))
 				LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation";
@@ -1062,10 +1030,12 @@ int LumpedRateModelWithPoresDG::residualParticle(double t, unsigned int parType,
 		(_dynReaction[parType] && (_dynReaction[parType]->numReactionsCombined() > 0)) ? _dynReaction[parType] : nullptr
 	};
 
+	linalg::BandedEigenSparseRowIterator jac(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) - idxr.offsetC());
+
 	// Handle time derivatives, binding, dynamic reactions
-	parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandMatrix::RowIterator, wantJac, true>(
+	parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>( // todo das erste true auf wnatjac setzen!
 		t, secIdx, ColumnPosition{ z, 0.0, static_cast<double>(radius) * 0.5 }, y, yDotBase ? yDot : nullptr, res,
-		_jacP[parType].row(colNode * idxr.strideParBlock(parType)), cellResParams, threadLocalMem.get()
+		jac, cellResParams, threadLocalMem.get()
 		);
 
 	return 0;
@@ -1156,71 +1126,8 @@ int LumpedRateModelWithPoresDG::residualFlux(double t, unsigned int secIdx, Stat
  */
 void LumpedRateModelWithPoresDG::assembleOffdiagJac(double t, unsigned int secIdx)
 {
-	// Clear matrices for new assembly
-	_jacCF.clear();
-	_jacFC.clear();
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		_jacPF[type].clear();
-		_jacFP[type].clear();
-	}
 
-	Indexer idxr(_disc);
-
-	const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
-
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-	{
-		const unsigned int typeOffset = type * _disc.nPoints * _disc.nComp;
-
-		const double epsP = static_cast<double>(_parPorosity[type]);
-		const double radius = static_cast<double>(_parRadius[type]);
-		const double jacCF_val = invBetaC * _parGeomSurfToVol[type] / radius;
-		const double jacPF_val = -_parGeomSurfToVol[type] / (radius * epsP);
-
-		active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
-		active const* const poreAccFactor = _poreAccessFactor.data() + type * _disc.nComp;
-
-		// Note that the J_f block, which is the identity matrix, is treated in the linear solver
-
-		// J_{0,f} block, adds flux to column void / bulk volume equations
-		for (unsigned int eq = 0; eq < _disc.nPoints * _disc.nComp; ++eq)
-		{
-			const unsigned int colCell = eq / _disc.nComp;
-			const unsigned int comp = eq % _disc.nComp;
-
-			// Main diagonal corresponds to j_{f,i} (flux) state variable
-			_jacCF.addElement(eq, eq + typeOffset, jacCF_val * static_cast<double>(filmDiff[comp]) * static_cast<double>(_parTypeVolFrac[type + _disc.nParType * colCell]));
-		}
-
-		// J_{f,0} block, adds bulk volume state c_i to flux equation
-		for (unsigned int eq = 0; eq < _disc.nPoints * _disc.nComp; ++eq)
-		{
-			_jacFC.addElement(eq + typeOffset, eq, -1.0);
-		}
-
-		// J_{p,f} block, implements bead boundary condition in outer bead shell equation
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				const unsigned int col = pblk * idxr.strideParBlock(type) + comp;
-				_jacPF[type].addElement(col, eq, jacPF_val / static_cast<double>(poreAccFactor[comp]) * static_cast<double>(filmDiff[comp]));
-			}
-		}
-
-		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = typeOffset + pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				const unsigned int col = pblk * idxr.strideParBlock(type) + comp;
-				_jacFP[type].addElement(eq, col, 1.0);
-			}
-		}
-	}
+	calcFluxJacobians(secIdx);
 }
 
 int LumpedRateModelWithPoresDG::residualSensFwdWithJacobian(const SimulationTime& simTime, const ConstSimulationState& simState,
