@@ -34,7 +34,6 @@
 #include "linalg/BandedEigenSparseRowIterator.hpp"
 #include "linalg/SparseMatrix.hpp"
 #include "linalg/BandMatrix.hpp"
-#include "linalg/Gmres.hpp"
 #include "Memory.hpp"
 #include "model/ModelUtils.hpp"
 #include "ParameterMultiplexing.hpp"
@@ -184,7 +183,6 @@ public:
 			_timerFactorize.totalElapsedTime(),
 			_timerFactorizePar.totalElapsedTime(),
 			_timerMatVec.totalElapsedTime(),
-			_timerGmres.totalElapsedTime()
 			});
 	}
 
@@ -203,7 +201,6 @@ public:
 			"Factorize",
 			"FactorizePar",
 			"MatVec",
-			"Gmres"
 		};
 		return desc;
 	}
@@ -230,12 +227,9 @@ protected:
 	void assembleOffdiagJac(double t, unsigned int secIdx);
 	void extractJacobianFromAD(active const* const adRes, unsigned int adDirOffset);
 
-	void assembleDiscretizedBulkJacobian(double alpha, Indexer idxr);
+	void assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr);
 
-	int schurComplementMatrixVector(double const* x, double* z) const;
-	void assembleDiscretizedJacobianParticleBlock(unsigned int type, double alpha, const Indexer& idxr);
-
-	void addTimeDerivativeToJacobianParticleBlock(linalg::FactorizableBandMatrix::RowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType);
+	void addTimeDerivativeToJacobianParticleBlock(linalg::BandedEigenSparseRowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType);
 	void solveForFluxes(double* const vecState, const Indexer& idxr);
 
 	unsigned int numAdDirsForJacobian() const CADET_NOEXCEPT;
@@ -511,22 +505,15 @@ protected:
 	parts::ConvectionDispersionOperatorBase _convDispOp; //!< Convection dispersion operator for interstitial volume transport
 	IDynamicReactionModel* _dynReactionBulk; //!< Dynamic reactions in the bulk volume
 
-	Eigen::SparseLU<Eigen::SparseMatrix<double>> _bulkSolver; //!< linear solver for the bulk concentration
-	//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> _bulkSolver;
-
-	std::vector<linalg::BandMatrix> _jacP; //!< Particle jacobian diagonal blocks (all of them for each particle type)
-	std::vector<linalg::FactorizableBandMatrix> _jacPdisc; //!< Particle jacobian diagonal blocks (all of them for each particle type) with time derivatives from BDF method
-
-	linalg::DoubleSparseMatrix _jacCF; //!< Jacobian block connecting interstitial states and fluxes (interstitial transport equation)
-	linalg::DoubleSparseMatrix _jacFC; //!< Jacobian block connecting fluxes and interstitial states (flux equation)
-	std::vector<linalg::DoubleSparseMatrix> _jacPF; //!< Jacobian blocks connecting particle states and fluxes (particle transport boundary condition)
-	std::vector<linalg::DoubleSparseMatrix> _jacFP; //!< Jacobian blocks connecting fluxes and particle states (flux equation)
+	Eigen::SparseLU<Eigen::SparseMatrix<double>> _globalSolver; //!< linear solver for the bulk concentration
+	//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> _globalSolver;
 
 	Eigen::MatrixXd _jacInlet; //!< Jacobian inlet DOF block matrix connects inlet DOFs to first bulk cells
 
 	// for FV the bulk jacobians are defined in the ConvDisp operator.
-	Eigen::SparseMatrix<double, RowMajor> _jacC; //!< Bulk Jacobian (DG)
-	Eigen::SparseMatrix<double, RowMajor> _jacCdisc; //!< Bulk Jacobian (DG) with time derivatove from BDF method
+	Eigen::SparseMatrix<double, RowMajor> _globalJac; //!< global Jacobian
+	Eigen::SparseMatrix<double, RowMajor> _globalJacDisc; //!< global Jacobian with time derivatove from BDF method
+	//Eigen::MatrixXd _FDjac; //!< test purpose FD jacobian // todo delete
 
 	active _colPorosity; //!< Column porosity (external porosity) \f$ \varepsilon_c \f$
 	std::vector<double> _parGeomSurfToVol; //!< Particle surface to volume ratio factor (i.e., 3.0 for spherical, 2.0 for cylindrical, 1.0 for hexahedral)
@@ -548,8 +535,6 @@ protected:
 
 	bool _factorizeJacobian; //!< Determines whether the Jacobian needs to be factorized
 	double* _tempState; //!< Temporary storage with the size of the state vector or larger if binding models require it
-	linalg::Gmres _gmres; //!< GMRES algorithm for the Schur-complement in linearSolve()
-	double _schurSafety; //!< Safety factor for Schur-complement solution
 
 	std::vector<active> _initC; //!< Liquid bulk phase initial conditions
 	std::vector<active> _initCp; //!< Liquid particle phase initial conditions
@@ -568,10 +553,6 @@ protected:
 		BENCH_TIMER(_timerFactorize)
 		BENCH_TIMER(_timerFactorizePar)
 		BENCH_TIMER(_timerMatVec)
-		BENCH_TIMER(_timerGmres)
-
-		// Wrapper for calling the corresponding function in GeneralRateModel class
-		friend int schurComplementMultiplierLRMPoresDG(void* userData, double const* x, double* z);
 
 	class Indexer
 	{
@@ -951,19 +932,73 @@ protected:
 	/**
 	* @brief sets the sparsity pattern of the convection dispersion Jacobian
 	*/
-	void setConvDispJacPattern(Eigen::SparseMatrix<double, RowMajor>& mat) {
+	void setGlobalJacPattern(Eigen::SparseMatrix<double, RowMajor>& mat) {
 
 		std::vector<T> tripletList;
-		// TODO?: convDisp NNZ times two for now, but Convection NNZ < Dispersion NNZ
-		tripletList.reserve(2u * calcConvDispNNZ(_disc));
+
+		tripletList.reserve(nConvDispEntries());
 
 		if (_disc.exactInt)
 			ConvDispModalPattern(tripletList);
 		else
 			ConvDispNodalPattern(tripletList);
 
+		particlePattern(tripletList);
+
+		fluxPattern(tripletList);
+
 		mat.setFromTriplets(tripletList.begin(), tripletList.end());
 
+	}
+
+	/**
+	 * @brief sets the sparsity pattern of the particle Jacobian pattern (isotherm pattern)
+	 */
+	int particlePattern(std::vector<T>& tripletList) {
+
+		Indexer idxr(_disc);
+
+		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
+			for (unsigned int nCol = 0; nCol < _disc.nPoints; nCol++) {
+
+				int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ nCol }) - idxr.offsetC(); // inlet DOFs not included in Jacobian
+
+				// add dense nComp * nBound blocks, since all solid and liquid entries can be coupled through binding.
+				for (unsigned int parState = 0; parState < _disc.nComp + _disc.strideBound[parType]; parState++) {
+					for (unsigned int toParState = 0; toParState < _disc.nComp + _disc.strideBound[parType]; toParState++) {
+						tripletList.push_back(T(offset + parState, offset + toParState, 0.0));
+					}
+				}
+			}
+		}
+		return 1;
+	}
+
+	/**
+	 * @brief sets the sparsity pattern of the flux Jacobian pattern
+	 */
+	int fluxPattern(std::vector<T>& tripletList) {
+
+		Indexer idxr(_disc);
+
+		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
+			
+			int offC = 0; // inlet DOFs not included in Jacobian
+			int offP = idxr.offsetCp(ParticleTypeIndex{ parType }) - idxr.offsetC(); // inlet DOFs not included in Jacobian
+			int offF = idxr.offsetJf(ParticleTypeIndex{ parType }) - idxr.offsetC(); // inlet DOFs not included in Jacobian
+
+			// add dependency of c^b, c^p and flux on another
+			for (unsigned int nCol = 0; nCol < _disc.nPoints; nCol++) {
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+					tripletList.push_back(T(offC + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^b on flux
+					tripletList.push_back(T(offP + nCol * (_disc.nComp + _disc.nBound[parType]) + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^p on flux
+					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offC + nCol * _disc.nComp + comp, 0.0)); // flux on c^b
+					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offP + nCol * (_disc.nComp + _disc.nBound[parType]) + comp, 0.0)); // flux on c^p
+					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // flux on flux
+				}
+			}
+		}
+		return 1;
 	}
 
 	/**
@@ -1239,34 +1274,113 @@ protected:
 	}
 
 	/**
+	 * @brief analytically calculates the static (per section) bulk jacobian (inlet DOFs included!)
+	 * @return 1 if jacobain estimation fits the predefined pattern of the jacobian, 0 if not.
+	 */
+	int calcStaticAnaGlobalJacobian(unsigned int secIdx) {
+		
+		calcStaticAnaBulkJacobian(secIdx);
+
+		calcFluxJacobians(secIdx);
+
+		return 1;
+	}
+	/**
 	* @brief analytically calculates the static (per section) bulk jacobian (inlet DOFs included!)
 	* @return 1 if jacobain estimation fits the predefined pattern of the jacobian, 0 if not.
 	*/
-	int calcStaticAnaBulkJacobian(double t, unsigned int secIdx, const double* const y, util::ThreadLocalStorage& threadLocalMem) {
+	int calcStaticAnaBulkJacobian(unsigned int secIdx) {
 
 		// DG convection dispersion Jacobian
 		if (_disc.exactInt)
-			calcConvDispModalJacobian(_jacC);
+			calcConvDispModalJacobian(_globalJac);
 		else
-			calcConvDispNodalJacobian(_jacC);
+			calcConvDispNodalJacobian(_globalJac);
 
-		if (!_jacC.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
+		if (!_globalJac.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
 			return 0;
 
 		return 1;
 	}
 
-	/**
-	* @brief calculates the number of non zeros for the DG convection dispersion jacobian
-	* @detail only dispersion entries are relevant as the convection entries are a subset of these
-	*/
-	unsigned int calcConvDispNNZ(Discretization disc) {
+	int calcFluxJacobians(unsigned int secIdx) {
 
-		if (disc.exactInt) {
-			return disc.nComp * ((3u * disc.nCol - 2u) * disc.nNodes * disc.nNodes + (2u * disc.nCol - 3u) * disc.nNodes);
+		Indexer idxr(_disc);
+		
+		const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
+
+		for (unsigned int type = 0; type < _disc.nParType; type++) {
+
+			const double epsP = static_cast<double>(_parPorosity[type]);
+			const double radius = static_cast<double>(_parRadius[type]);
+			const double jacCF_val = invBetaC * _parGeomSurfToVol[type] / radius;
+			const double jacPF_val = -_parGeomSurfToVol[type] / (radius * epsP);
+
+			// Ordering of diffusion:
+			// sec0type0comp0, sec0type0comp1, sec0type0comp2, sec0type1comp0, sec0type1comp1, sec0type1comp2,
+			// sec1type0comp0, sec1type0comp1, sec1type0comp2, sec1type1comp0, sec1type1comp1, sec1type1comp2, ...
+			active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
+			active const* const poreAccFactor = _poreAccessFactor.data() + type * _disc.nComp;
+
+			linalg::BandedEigenSparseRowIterator jacClF(_globalJac, 0);
+			linalg::BandedEigenSparseRowIterator jacFCl(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
+			linalg::BandedEigenSparseRowIterator jacCpF(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) - idxr.offsetC());
+			linalg::BandedEigenSparseRowIterator jacFCp(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
+			linalg::BandedEigenSparseRowIterator jacFF(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
+
+			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCpF += _disc.strideBound[type])
+			{
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacClF, ++jacFCl, ++jacCpF, ++jacFCp, ++jacFF) {
+					// add Cl on F entries
+					// row: already at bulk phase. already at current node and component.
+					// col: add offset to Flux of current type. already at current node and component.
+					jacClF[idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC()]
+						= jacCF_val * static_cast<double>(filmDiff[comp]) * static_cast<double>(_parTypeVolFrac[type + _disc.nParType * colNode]);
+
+					// add F on Cl entries
+					// row: already at flux of current parType. already at current node and component.
+					// col: go back to bulk phase. already at current node and component.
+					jacFCl[-idxr.offsetJf(ParticleTypeIndex{ type }) + idxr.offsetC()] = -1.0;
+
+					// add Cp on F entries (inexact integration scheme)
+					// row: already at particle. already at current node and liquid state.
+					// col: go to flux of current parType and adjust for offsetC. jump over previous colNodes and add component offset
+					jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC() - jacCpF.row() + colNode * _disc.nComp + comp]
+						= jacPF_val / static_cast<double>(poreAccFactor[comp]) * static_cast<double>(filmDiff[comp]);
+
+					// add F on Cp entries
+					// row: already at flux of current parType. already at current node and component.
+					// col: go back to current particle type and particle and adjust for offsetC. Go to current component
+					jacFCp[-jacFCp.row() + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ colNode }) - idxr.offsetC() + comp]
+						= 1.0;
+
+					// add F on F entries (identity matrix)
+					jacFF[0] = 1.0;
+				}
+			}
+		}
+		return 1;
+	}
+
+	/**
+	 * @brief calculates the number of entris for the DG convection dispersion jacobian
+	 * @note only dispersion entries are relevant for jacobian NNZ as the convection entries are a subset of these
+	 */
+	unsigned int nConvDispEntries(bool pureNNZ = false) {
+
+		if (_disc.exactInt) {
+			if (pureNNZ) {
+				return _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
+			}
+			return _disc.nComp * _disc.nNodes * _disc.nNodes + _disc.nNodes // convection entries
+				+ _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
 		}
 		else {
-			return disc.nComp * (disc.nCol * disc.nNodes * disc.nNodes + 8u * disc.nNodes);
+			if (pureNNZ) {
+				return _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
+			}
+			return _disc.nComp * _disc.nNodes * _disc.nNodes + 1u // convection entries
+				+ _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
 		}
 	}
 
@@ -1330,8 +1444,8 @@ protected:
 								(i == nNodes - 1 && j >= nNodes - 1))
 								// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 								// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-								_jacC.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-											   offC + (cell - 1) * sCell + comp * sComp + j * sNode)
+								_globalJac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+													offC + (cell - 1) * sCell + comp * sComp + j * sNode)
 								= -dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
@@ -1364,8 +1478,8 @@ protected:
 						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
 							(i == 0 && j <= 2 * nNodes) ||
 							(i == nNodes - 1 && j >= nNodes - 1))
-							_jacC.coeffRef(offC + comp * sComp + i * sNode,
-										   offC + comp * sComp + (j - nNodes) * sNode)
+							_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+												offC + comp * sComp + (j - nNodes) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1382,8 +1496,8 @@ protected:
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes; j < nNodes * 2u; j++) {
-						_jacC.coeffRef(offC + comp * sComp + i * sNode,
-									   offC + comp * sComp + (j - nNodes) * sNode)
+						_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+											offC + comp * sComp + (j - nNodes) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1412,8 +1526,8 @@ protected:
 						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
 							(i == 0 && j <= 2 * nNodes) ||
 							(i == nNodes - 1 && j >= nNodes - 1))
-							_jacC.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-										   offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
+							_globalJac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+												offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1436,8 +1550,8 @@ protected:
 			for (unsigned int i = 0; i < convBlock.rows(); i++) {
 				//_jac.coeffRef(offC + comp * sComp + i * sNode, comp * sComp) = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
 				for (unsigned int j = 1; j < convBlock.cols(); j++) {
-					_jacC.coeffRef(offC + comp * sComp + i * sNode,
-						offC + comp * sComp + (j - 1) * sNode)
+					_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+										offC + comp * sComp + (j - 1) * sNode)
 						+= -convBlock(i, j);
 				}
 			}
@@ -1448,8 +1562,8 @@ protected:
 					for (unsigned int j = 0; j < convBlock.cols(); j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
 						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						_jacC.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-							offC + cell * sCell - sNode + comp * sComp + j * sNode)
+						_globalJac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+											offC + cell * sCell - sNode + comp * sComp + j * sNode)
 							+= -convBlock(i, j);
 					}
 				}
@@ -1774,8 +1888,8 @@ protected:
 						for (unsigned int j = 0; j < dispBlock.cols(); j++) {
 							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 							// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry
-							_jacC.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-										   offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+							_globalJac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+												offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 								= -dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
@@ -1795,8 +1909,8 @@ protected:
 					for (unsigned int j = 1; j < dispBlock.cols(); j++) {
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry. Also adjust for iterator j (-1)
-						_jacC.coeffRef(offC + nNodes * sNode + comp * sComp + i * sNode,
-									   offC + comp * sComp + (j - 1) * sNode)
+						_globalJac.coeffRef(offC + nNodes * sNode + comp * sComp + i * sNode,
+											offC + comp * sComp + (j - 1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1811,8 +1925,8 @@ protected:
 					for (unsigned int j = 0; j < dispBlock.cols() - 1; j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + (nCells - 2) * sCell + comp * sComp + i * sNode,
-									   offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+						_globalJac.coeffRef(offC + (nCells - 2) * sCell + comp * sComp + i * sNode,
+											offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1830,8 +1944,8 @@ protected:
 					for (unsigned int j = nNodes + 1; j < dispBlock.cols(); j++) {
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + comp * sComp + i * sNode,
-									   offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+						_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+											offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1846,8 +1960,8 @@ protected:
 					for (unsigned int j = 0; j < 2 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for relevant dispersion block entries.
-						_jacC.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-									   offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
+						_globalJac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+											offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1863,8 +1977,8 @@ protected:
 					for (unsigned int j = nNodes + 1; j < 2 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + comp * sComp + i * sNode,
-									   offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+						_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+											offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1877,8 +1991,8 @@ protected:
 					for (unsigned int j = nNodes + 1; j < 3 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + comp * sComp + i * sNode,
-									   offC + comp * sComp + (j - (nNodes + 1)) * sNode)
+						_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+											offC + comp * sComp + (j - (nNodes + 1)) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1889,8 +2003,8 @@ protected:
 					for (unsigned int j = 1; j < 2 * nNodes + 1; j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-									   offC + (nCells - 1) * sCell - (nNodes)*sNode + comp * sComp + (j - 1) * sNode)
+						_globalJac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+											offC + (nCells - 1) * sCell - (nNodes)*sNode + comp * sComp + (j - 1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1903,8 +2017,8 @@ protected:
 					for (unsigned int j = 1; j < dispBlock.cols() - 1; j++) {
 						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
 						// col: jump over inlet DOFs and previous cell, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
-						_jacC.coeffRef(offC + 1 * sCell + comp * sComp + i * sNode,
-									   offC + 1 * sCell - (nNodes)*sNode + comp * sComp + (j - 1) * sNode)
+						_globalJac.coeffRef(offC + 1 * sCell + comp * sComp + i * sNode,
+											offC + 1 * sCell - (nNodes)*sNode + comp * sComp + (j - 1) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1925,8 +2039,8 @@ protected:
 			for (unsigned int i = 0; i < convBlock.rows(); i++) {
 				//_jac.coeffRef(offC + comp * sComp + i * sNode, comp * sComp) = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
 				for (unsigned int j = 1; j < convBlock.cols(); j++) {
-					_jacC.coeffRef(offC + comp * sComp + i * sNode,
-								   offC + comp * sComp + (j - 1) * sNode)
+					_globalJac.coeffRef(offC + comp * sComp + i * sNode,
+										offC + comp * sComp + (j - 1) * sNode)
 						-= convBlock(i, j);
 				}
 			}
@@ -1937,8 +2051,8 @@ protected:
 					for (unsigned int j = 0; j < convBlock.cols(); j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
 						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						_jacC.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-									   offC + cell * sCell - sNode + comp * sComp + j * sNode)
+						_globalJac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
+											offC + cell * sCell - sNode + comp * sComp + j * sNode)
 							-= convBlock(i, j);
 					}
 				}
@@ -1956,11 +2070,59 @@ protected:
 
 		unsigned int offC = 0; // inlet DOFs not included in Jacobian
 
-		for (linalg::BandedEigenSparseRowIterator jac(_jacCdisc, offC); jac.row() < _disc.nComp * _disc.nPoints; ++jac) {
+		for (linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, offC); jac.row() < _disc.nComp * _disc.nPoints; ++jac) {
 
 				jac[0] += alpha; // main diagonal
 		
 		}
+	}
+
+	// testing purpose
+	MatrixXd calcFDJacobian(const SimulationTime simTime, util::ThreadLocalStorage& threadLocalMem, double alpha) {
+
+		// create solution vectors
+		VectorXd y = VectorXd::Zero(numDofs());
+		VectorXd yDot = VectorXd::Zero(numDofs());
+		VectorXd res = VectorXd::Zero(numDofs());
+		const double* yPtr = &y[0];
+		const double* yDotPtr = &yDot[0];
+		double* resPtr = &res[0];
+		// create FD jacobian
+		MatrixXd Jacobian = MatrixXd::Zero(numDofs(), numDofs());
+		// set FD step
+		double epsilon = 0.01;
+
+		residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+
+		for (int col = 0; col < Jacobian.cols(); col++) {
+			Jacobian.col(col) = -(1.0 + alpha) * res;
+		}
+		/*	 Residual(y+h)	*/
+		// state DOFs
+		for (int dof = 0; dof < Jacobian.cols(); dof++) {
+			y[dof] += epsilon;
+			residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+			y[dof] -= epsilon;
+			Jacobian.col(dof) += res;
+		}
+
+		// state derivative Jacobian
+		for (int dof = 0; dof < Jacobian.cols(); dof++) {
+			yDot[dof] += epsilon;
+			residualImpl<double, double, double, false>(simTime.t, simTime.secIdx, yPtr, yDotPtr, resPtr, threadLocalMem);
+			yDot[dof] -= epsilon;
+			Jacobian.col(dof) += alpha * res;
+		}
+
+		///*	exterminate numerical noise	and divide by epsilon*/
+		//for (int i = 0; i < Jacobian.rows(); i++) {
+		//	for (int j = 0; j < Jacobian.cols(); j++) {
+		//		if (std::abs(Jacobian(i, j)) < 1e-10) Jacobian(i, j) = 0.0;
+		//	}
+		//}
+		Jacobian /= epsilon;
+
+		return Jacobian;
 	}
 
 };

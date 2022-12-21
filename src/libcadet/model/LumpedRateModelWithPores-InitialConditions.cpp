@@ -1582,7 +1582,7 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 			LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
 			// Reuse memory of band matrix for dense matrix
-			linalg::DenseMatrixView fullJacobianMatrix(_jacPdisc[type].data() + pblk * mask.len * mask.len, nullptr, mask.len, mask.len);
+			linalg::DenseMatrixView fullJacobianMatrix(_globalJacDisc.valuePtr() + _globalJacDisc.outerIndexPtr()[idxr.offsetCp(ParticleTypeIndex{ type }) - idxr.offsetC() + pblk], nullptr, mask.len, mask.len);
 
 			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
 			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
@@ -1602,7 +1602,7 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 			double* const fullX = static_cast<double*>(fullXBuffer);
 
 			BufferedArray<double> jacobianMemBuffer = tlmAlloc.array<double>(probSize * probSize);
-			linalg::DenseMatrixView jacobianMatrix(static_cast<double*>(jacobianMemBuffer), _jacPdisc[type].pivot() + pblk * probSize, probSize, probSize);
+			linalg::DenseMatrixView jacobianMatrix(static_cast<double*>(jacobianMemBuffer), _globalJacDisc.outerIndexPtr() + pblk * probSize, probSize, probSize);
 
 			BufferedArray<double> conservedQuantsBuffer = tlmAlloc.array<double>(numActiveComp);
 			double* const conservedQuants = static_cast<double*>(conservedQuantsBuffer);
@@ -1830,6 +1830,9 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 	std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
 
 	solveForFluxes(vecStateY, idxr);
+
+	// reset jacobian pattern //@todo can this be avoided?
+	setGlobalJacPattern(_globalJacDisc);
 }
 
 /**
@@ -1900,17 +1903,16 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 	//_convDispOp.solveTimeDerivativeSystem(simTime, vecStateYdot + idxr.offsetC());
 
 	// Assemble
-	double* vPtr = _jacCdisc.valuePtr();
-	for (int k = 0; k < _jacCdisc.nonZeros(); k++) {
+	double* vPtr = _globalJacDisc.valuePtr();
+	for (int k = 0; k < _globalJacDisc.nonZeros(); k++) {
 		vPtr[k] = 0.0;
 	}
 	addTimeDerBulkJacobian(1.0, idxr);
 
-	// Factorize
-	_bulkSolver.factorize(_jacCdisc);
-
-	// Solve
-	yDot.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(yDot.segment(idxr.offsetC(), _disc.nComp *_disc.nPoints));
+	// set (film) flux dependency for now (needed to apply solver). Fluxes are computed afterwards.
+	linalg::BandedEigenSparseRowIterator jacFilm(_globalJacDisc, idxr.offsetJf() - idxr.offsetC());
+	for (unsigned int film = 0; film < _disc.nPoints * _disc.nComp * _disc.nParType; film++, ++jacFilm)
+		jacFilm[0] = 1.0;
 
 	// Process the particle blocks
 #ifdef CADET_PARALLELIZE
@@ -1923,7 +1925,6 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 		LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 		double* const dFluxDt = _tempState + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) });
 
-		_jacPdisc[type].setAll(0.0);
 		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
 		{
 			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
@@ -1931,17 +1932,17 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
 
 			// Assemble
-			linalg::FactorizableBandMatrix::RowIterator jac = _jacPdisc[type].row(idxr.strideParBlock(type) * pblk);
+			linalg::BandedEigenSparseRowIterator jacPar(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ pblk }) - idxr.offsetC());
 
 			// Mobile and stationary phase (advances jac accordingly)
-			addTimeDerivativeToJacobianParticleBlock(jac, idxr, 1.0, type);
+			addTimeDerivativeToJacobianParticleBlock(jacPar, idxr, 1.0, type);
 
 			if (!_binding[type]->hasQuasiStationaryReactions())
 				continue;
 
 			// Get iterators to beginning of solid phase
-			linalg::BandMatrix::RowIterator jacSolidOrig = _jacP[type].row(idxr.strideParBlock(type) * pblk + static_cast<unsigned int>(idxr.strideParLiquid()));
-			linalg::FactorizableBandMatrix::RowIterator jacSolid = jac - idxr.strideParBound(type);
+			linalg::BandedEigenSparseRowIterator jacSolidOrig(_globalJac, idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ pblk }) - idxr.offsetC() + idxr.strideParLiquid());
+			linalg::BandedEigenSparseRowIterator jacSolid = jacPar - idxr.strideParBound(type);
 
 			int const* const mask = _binding[type]->reactionQuasiStationarity();
 			double* const qShellDot = vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ pblk }) + idxr.strideParLiquid();
@@ -1966,28 +1967,27 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 			}
 		}
 
-		// Precondition
-		double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) });
-		_jacPdisc[type].rowScaleFactors(scaleFactors);
-		_jacPdisc[type].scaleRows(scaleFactors);
-
-		// Factorize
-		const bool result = _jacPdisc[type].factorize();
-		if (!result)
-		{
-			LOG(Error) << "Factorize() failed for par type block " << type;
-		}
-
-		const bool result2 = _jacPdisc[type].solve(scaleFactors, vecStateYdot + idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }));
-		if (!result2)
-		{
-			LOG(Error) << "Solve() failed for par type block " << type;
-		}
 	} CADET_PARFOR_END;
 
 #ifdef CADET_PARALLELIZE
 	BENCH_STOP(_timerConsistentInitPar);
 #endif
+
+
+	// Factorize
+	_globalSolver.factorize(_globalJacDisc);
+
+	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+	{
+		LOG(Error) << "Factorize() failed";
+	}
+	// Solve
+	yDot.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(yDot.segment(idxr.offsetC(), numPureDofs()));
+
+	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+	{
+		LOG(Error) << "Solve() failed";
+	}
 
 	// Step 2b: Solve for fluxes j_f by backward substitution
 
@@ -2505,12 +2505,11 @@ void LumpedRateModelWithPoresDG::solveForFluxes(double* const vecState, const In
 	// Thus, jacFC contains -k_f and jacFP +k_f.
 	// We just need to subtract both -k_f * c and k_f * c_p to get j_f == k_f * (c - c_p)
 
-	double* const jf = vecState + idxr.offsetJf();
+	Eigen::Map<Eigen::VectorXd> flux(reinterpret_cast<double* const>(vecState + idxr.offsetJf()), static_cast<int>(numDofs()) - idxr.offsetJf());
+	Eigen::Map<Eigen::VectorXd> pureState(reinterpret_cast<double* const>(vecState + idxr.offsetC()), idxr.offsetJf() - idxr.offsetC());
 
-	// Note that we cannot parallelize this loop since we are updating the fluxes in-place
-	_jacFC.multiplySubtract(vecState + idxr.offsetC(), jf);
-	for (unsigned int type = 0; type < _disc.nParType; ++type)
-		_jacFP[type].multiplySubtract(vecState + idxr.offsetCp(ParticleTypeIndex{ type }), jf);
+	flux = -_globalJac.block(idxr.offsetJf() - idxr.offsetC(), 0, static_cast<int>(numDofs()) - idxr.offsetJf(), idxr.offsetJf() - idxr.offsetC())
+		* pureState;
 }
 
 }  // namespace model
