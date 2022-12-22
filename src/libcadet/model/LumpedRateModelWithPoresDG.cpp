@@ -952,9 +952,6 @@ int LumpedRateModelWithPoresDG::residualBulk(double t, unsigned int secIdx, Stat
 	const double* yPtr = reinterpret_cast<const double*>(yBase);
 	const double* const ypPtr = reinterpret_cast<const double* const>(yDotBase);
 	double* const resPtr = reinterpret_cast<double* const>(resBase);
-	Eigen::Map<const Eigen::VectorXd> y(yPtr, numDofs());
-	Eigen::Map<const Eigen::VectorXd> yp(ypPtr, numDofs());
-	Eigen::Map<Eigen::VectorXd> res(resPtr, numDofs());
 
 	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 
@@ -1033,7 +1030,7 @@ int LumpedRateModelWithPoresDG::residualParticle(double t, unsigned int parType,
 	linalg::BandedEigenSparseRowIterator jac(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) - idxr.offsetC());
 
 	// Handle time derivatives, binding, dynamic reactions
-	parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>( // todo das erste true auf wnatjac setzen!
+	parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
 		t, secIdx, ColumnPosition{ z, 0.0, static_cast<double>(radius) * 0.5 }, y, yDotBase ? yDot : nullptr, res,
 		jac, cellResParams, threadLocalMem.get()
 		);

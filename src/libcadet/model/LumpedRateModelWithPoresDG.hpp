@@ -978,7 +978,7 @@ protected:
 	 * @brief sets the sparsity pattern of the flux Jacobian pattern
 	 */
 	int fluxPattern(std::vector<T>& tripletList) {
-
+		
 		Indexer idxr(_disc);
 
 		for (unsigned int parType = 0; parType < _disc.nParType; parType++) {
@@ -991,9 +991,9 @@ protected:
 			for (unsigned int nCol = 0; nCol < _disc.nPoints; nCol++) {
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 					tripletList.push_back(T(offC + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^b on flux
-					tripletList.push_back(T(offP + nCol * (_disc.nComp + _disc.nBound[parType]) + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^p on flux
 					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offC + nCol * _disc.nComp + comp, 0.0)); // flux on c^b
-					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offP + nCol * (_disc.nComp + _disc.nBound[parType]) + comp, 0.0)); // flux on c^p
+					tripletList.push_back(T(offP + nCol * idxr.strideParBlock(parType) + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^p on flux
+					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offP + nCol * idxr.strideParBlock(parType) + comp, 0.0)); // flux on c^p
 					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // flux on flux
 				}
 			}
