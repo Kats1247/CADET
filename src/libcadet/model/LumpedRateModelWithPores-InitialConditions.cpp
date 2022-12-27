@@ -1823,14 +1823,6 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 		} CADET_PARFOR_END;
 	}
 
-	// Step 1b: Compute fluxes j_f
-
-	// Reset j_f to 0.0
-	double* const jf = vecStateY + idxr.offsetJf();
-	std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateY, idxr);
-
 	// reset jacobian pattern //@todo can this be avoided?
 	setGlobalJacPattern(_globalJacDisc);
 }
@@ -1909,11 +1901,6 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 	}
 	addTimeDerBulkJacobian(1.0, idxr);
 
-	// set (film) flux dependency for now (needed to apply solver). Fluxes are computed afterwards.
-	linalg::BandedEigenSparseRowIterator jacFilm(_globalJacDisc, idxr.offsetJf() - idxr.offsetC());
-	for (unsigned int film = 0; film < _disc.nPoints * _disc.nComp * _disc.nParType; film++, ++jacFilm)
-		jacFilm[0] = 1.0;
-
 	// Process the particle blocks
 #ifdef CADET_PARALLELIZE
 	BENCH_START(_timerConsistentInitPar);
@@ -1988,14 +1975,6 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 	{
 		LOG(Error) << "Solve() failed";
 	}
-
-	// Step 2b: Solve for fluxes j_f by backward substitution
-
-	// Reset \dot{j}_f to 0.0
-	double* const jfDot = vecStateYdot + idxr.offsetJf();
-	std::fill(jfDot, jfDot + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateYdot, idxr);
 }
 
 
@@ -2047,14 +2026,7 @@ void LumpedRateModelWithPoresDG::leanConsistentInitialState(const SimulationTime
 	BENCH_SCOPE(_timerConsistentInit);
 
 	Indexer idxr(_disc);
-
-	// Step 1: Compute fluxes j_f
-
-	// Reset j_f to 0.0
-	double* const jf = vecStateY + idxr.offsetJf();
-	std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateY, idxr);
+	// Tdod ??
 }
 
 /**
@@ -2489,27 +2461,6 @@ void LumpedRateModelWithPoresDG::leanConsistentInitialSensitivity(const Simulati
 	//	// Step 2b: Solve for fluxes j_f by backward substitution
 	//	solveForFluxes(sensYdot, idxr);
 	//}
-}
-
-/**
- * @brief Solves the algebraic flux equations for the fluxes @f$ j_f @f$
- * @details The equation to be solved is @f$ j_f - k_f * (c - c_p) == y @f$, where @f$ y @f$
- *          is a given vector.
- * @param [in,out] vecState On entry the state vector with @f$ y @f$ in its flux variables @f$ j_f @f$,
- *                 on exit the solution @f$ j_f. @f$
- * @param [in] idxr Indexer
- */
-void LumpedRateModelWithPoresDG::solveForFluxes(double* const vecState, const Indexer& idxr)
-{
-	// We have j_f - k_f * (c - c_p) == 0
-	// Thus, jacFC contains -k_f and jacFP +k_f.
-	// We just need to subtract both -k_f * c and k_f * c_p to get j_f == k_f * (c - c_p)
-
-	Eigen::Map<Eigen::VectorXd> flux(reinterpret_cast<double* const>(vecState + idxr.offsetJf()), static_cast<int>(numDofs()) - idxr.offsetJf());
-	Eigen::Map<Eigen::VectorXd> pureState(reinterpret_cast<double* const>(vecState + idxr.offsetC()), idxr.offsetJf() - idxr.offsetC());
-
-	flux = -_globalJac.block(idxr.offsetJf() - idxr.offsetC(), 0, static_cast<int>(numDofs()) - idxr.offsetJf(), idxr.offsetJf() - idxr.offsetC())
-		* pureState;
 }
 
 }  // namespace model
