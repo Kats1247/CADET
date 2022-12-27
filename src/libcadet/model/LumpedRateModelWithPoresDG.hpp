@@ -224,13 +224,12 @@ protected:
 	template <typename StateType, typename ResidualType, typename ParamType>
 	int residualFlux(double t, unsigned int secIdx, StateType const* y, double const* yDot, ResidualType* res);
 
-	void assembleOffdiagJac(double t, unsigned int secIdx);
+	void assembleFluxJacobian(double t, unsigned int secIdx);
 	void extractJacobianFromAD(active const* const adRes, unsigned int adDirOffset);
 
 	void assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr);
 
 	void addTimeDerivativeToJacobianParticleBlock(linalg::BandedEigenSparseRowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType);
-	void solveForFluxes(double* const vecState, const Indexer& idxr);
 
 	unsigned int numAdDirsForJacobian() const CADET_NOEXCEPT;
 
@@ -578,8 +577,6 @@ protected:
 		inline int offsetCp() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints + offsetC(); }
 		inline int offsetCp(ParticleTypeIndex pti) const CADET_NOEXCEPT { return offsetCp() + _disc.parTypeOffset[pti.value]; }
 		inline int offsetCp(ParticleTypeIndex pti, ParticleIndex pi) const CADET_NOEXCEPT { return offsetCp(pti) + strideParBlock(pti.value) * pi.value; }
-		inline int offsetJf() const CADET_NOEXCEPT { return offsetCp() + _disc.parTypeOffset[_disc.nParType]; }
-		inline int offsetJf(ParticleTypeIndex pti) const CADET_NOEXCEPT { return offsetJf() + pti.value * _disc.nPoints * _disc.nComp; }
 		inline int offsetBoundComp(ParticleTypeIndex pti, ComponentIndex comp) const CADET_NOEXCEPT { return _disc.boundOffset[pti.value * _disc.nComp + comp.value]; }
 
 		// Return pointer to first element of state variable in state vector
@@ -591,9 +588,6 @@ protected:
 
 		template <typename real_t> inline real_t* q(real_t* const data) const { return data + offsetCp() + strideParLiquid(); }
 		template <typename real_t> inline real_t const* q(real_t const* const data) const { return data + offsetCp() + strideParLiquid(); }
-
-		template <typename real_t> inline real_t* jf(real_t* const data) const { return data + offsetJf(); }
-		template <typename real_t> inline real_t const* jf(real_t const* const data) const { return data + offsetJf(); }
 
 		// Return specific variable in state vector
 		template <typename real_t> inline real_t& c(real_t* const data, unsigned int point, unsigned int comp) const { return data[offsetC() + comp + point * strideColNode()]; }
@@ -610,7 +604,7 @@ protected:
 		Exporter(const Discretization& disc, const LumpedRateModelWithPoresDG& model, double const* data) : _disc(disc), _idx(disc), _model(model), _data(data) { }
 		Exporter(const Discretization&& disc, const LumpedRateModelWithPoresDG& model, double const* data) = delete;
 
-		virtual bool hasParticleFlux() const CADET_NOEXCEPT { return true; }
+		virtual bool hasParticleFlux() const CADET_NOEXCEPT { return false; }
 		virtual bool hasParticleMobilePhase() const CADET_NOEXCEPT { return true; }
 		virtual bool hasSolidPhase() const CADET_NOEXCEPT { return _disc.strideBound[_disc.nParType] > 0; }
 		virtual bool hasVolume() const CADET_NOEXCEPT { return false; }
@@ -627,11 +621,11 @@ protected:
 		virtual unsigned int numBulkDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints; }
 		virtual unsigned int numParticleMobilePhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints; }
 		virtual unsigned int numSolidPhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.strideBound[parType] * _disc.nPoints; }
-		virtual unsigned int numFluxDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints * _disc.nParType; }
+		virtual unsigned int numFluxDofs() const CADET_NOEXCEPT { return 0; }
 		virtual unsigned int numVolumeDofs() const CADET_NOEXCEPT { return 0; }
 
 		virtual double const* concentration() const { return _idx.c(_data); }
-		virtual double const* flux() const { return _idx.jf(_data); }
+		virtual double const* flux() const { return nullptr; }
 		virtual double const* particleMobilePhase(unsigned int parType) const { return _data + _idx.offsetCp(ParticleTypeIndex{ parType }); }
 		virtual double const* solidPhase(unsigned int parType) const { return _data + _idx.offsetCp(ParticleTypeIndex{ parType }) + _idx.strideParLiquid(); }
 		virtual double const* volume() const { return nullptr; }
@@ -657,8 +651,8 @@ protected:
 
 		virtual StateOrdering const* fluxOrdering(unsigned int& len) const
 		{
-			len = _fluxOrdering.size();
-			return _fluxOrdering.data();
+			len = 0;
+			return nullptr;
 		}
 
 		virtual StateOrdering const* mobilePhaseOrdering(unsigned int& len) const
@@ -704,7 +698,6 @@ protected:
 		const std::array<StateOrdering, 2> _concentrationOrdering = { { StateOrdering::AxialCell, StateOrdering::Component } };
 		const std::array<StateOrdering, 3> _particleOrdering = { { StateOrdering::ParticleType, StateOrdering::AxialCell, StateOrdering::Component } };
 		const std::array<StateOrdering, 4> _solidOrdering = { { StateOrdering::ParticleType, StateOrdering::AxialCell, StateOrdering::Component, StateOrdering::BoundState } };
-		const std::array<StateOrdering, 3> _fluxOrdering = { { StateOrdering::ParticleType, StateOrdering::AxialCell, StateOrdering::Component } };
 	};
 
 	/**
@@ -985,16 +978,14 @@ protected:
 			
 			int offC = 0; // inlet DOFs not included in Jacobian
 			int offP = idxr.offsetCp(ParticleTypeIndex{ parType }) - idxr.offsetC(); // inlet DOFs not included in Jacobian
-			int offF = idxr.offsetJf(ParticleTypeIndex{ parType }) - idxr.offsetC(); // inlet DOFs not included in Jacobian
 
 			// add dependency of c^b, c^p and flux on another
 			for (unsigned int nCol = 0; nCol < _disc.nPoints; nCol++) {
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-					tripletList.push_back(T(offC + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^b on flux
-					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offC + nCol * _disc.nComp + comp, 0.0)); // flux on c^b
-					tripletList.push_back(T(offP + nCol * idxr.strideParBlock(parType) + comp, offF + nCol * _disc.nComp + comp, 0.0)); // c^p on flux
-					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offP + nCol * idxr.strideParBlock(parType) + comp, 0.0)); // flux on c^p
-					tripletList.push_back(T(offF + nCol * _disc.nComp + comp, offF + nCol * _disc.nComp + comp, 0.0)); // flux on flux
+					// c^b on c^b entry already set
+					tripletList.push_back(T(offC + nCol * _disc.nComp + comp, offP + nCol * idxr.strideParBlock(parType) + comp, 0.0)); // c^b on c^p
+					// c^p on c^p entry already set
+					tripletList.push_back(T(offP + nCol * idxr.strideParBlock(parType) + comp, offC + nCol * _disc.nComp + comp, 0.0)); // c^p on c^b
 				}
 			}
 		}
@@ -1306,7 +1297,7 @@ protected:
 	int calcFluxJacobians(unsigned int secIdx) {
 
 		Indexer idxr(_disc);
-		
+
 		const double invBetaC = 1.0 / static_cast<double>(_colPorosity) - 1.0;
 
 		for (unsigned int type = 0; type < _disc.nParType; type++) {
@@ -1322,40 +1313,32 @@ protected:
 			active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + type * _disc.nComp;
 			active const* const poreAccFactor = _poreAccessFactor.data() + type * _disc.nComp;
 
-			linalg::BandedEigenSparseRowIterator jacClF(_globalJac, 0);
-			linalg::BandedEigenSparseRowIterator jacFCl(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
-			linalg::BandedEigenSparseRowIterator jacCpF(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) - idxr.offsetC());
-			linalg::BandedEigenSparseRowIterator jacFCp(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
-			linalg::BandedEigenSparseRowIterator jacFF(_globalJac, idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC());
+			linalg::BandedEigenSparseRowIterator jacC(_globalJac, 0);
+			linalg::BandedEigenSparseRowIterator jacP(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) - idxr.offsetC());
 
-			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCpF += _disc.strideBound[type])
+			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacP += _disc.strideBound[type])
 			{
-				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacClF, ++jacFCl, ++jacCpF, ++jacFCp, ++jacFF) {
-					// add Cl on F entries
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacC, ++jacP) {
+
+					// add Cl on Cl entries (added since already set in bulk jacobian)
 					// row: already at bulk phase. already at current node and component.
-					// col: add offset to Flux of current type. already at current node and component.
-					jacClF[idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC()]
-						= jacCF_val * static_cast<double>(filmDiff[comp]) * static_cast<double>(_parTypeVolFrac[type + _disc.nParType * colNode]);
+					// col: already at bulk phase. already at current node and component.
+					jacC[0] += jacCF_val * static_cast<double>(filmDiff[comp]) * static_cast<double>(_parTypeVolFrac[type + _disc.nParType * colNode]);
+					// add Cl on Cp entries
+					// row: already at bulk phase. already at current node and component.
+					// col: already at bulk phase. already at current node and component.
+					jacC[jacP.row() - jacC.row()] = -jacCF_val * static_cast<double>(filmDiff[comp]) * static_cast<double>(_parTypeVolFrac[type + _disc.nParType * colNode]);
 
-					// add F on Cl entries
-					// row: already at flux of current parType. already at current node and component.
-					// col: go back to bulk phase. already at current node and component.
-					jacFCl[-idxr.offsetJf(ParticleTypeIndex{ type }) + idxr.offsetC()] = -1.0;
-
-					// add Cp on F entries (inexact integration scheme)
+					// add Cp on Cp entries
 					// row: already at particle. already at current node and liquid state.
 					// col: go to flux of current parType and adjust for offsetC. jump over previous colNodes and add component offset
-					jacCpF[idxr.offsetJf(ParticleTypeIndex{ type }) - idxr.offsetC() - jacCpF.row() + colNode * _disc.nComp + comp]
+					jacP[0]
+						= -jacPF_val / static_cast<double>(poreAccFactor[comp]) * static_cast<double>(filmDiff[comp]);
+					// add Cp on Cl entries
+					// row: already at particle. already at current node and liquid state.
+					// col: go to flux of current parType and adjust for offsetC. jump over previous colNodes and add component offset
+					jacP[jacC.row() - jacP.row()]
 						= jacPF_val / static_cast<double>(poreAccFactor[comp]) * static_cast<double>(filmDiff[comp]);
-
-					// add F on Cp entries
-					// row: already at flux of current parType. already at current node and component.
-					// col: go back to current particle type and particle and adjust for offsetC. Go to current component
-					jacFCp[-jacFCp.row() + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ colNode }) - idxr.offsetC() + comp]
-						= 1.0;
-
-					// add F on F entries (identity matrix)
-					jacFF[0] = 1.0;
 				}
 			}
 		}
