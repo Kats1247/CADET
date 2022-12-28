@@ -1613,14 +1613,11 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 
 	Indexer idxr(_disc);
 
-	// no consistent initialization for inexact integration DG discretization of particle mass balance. 
+	// initialization for inexact integration DG discretization of particle mass balance not supported. This would require the consideration of the additional algebraic constraints,
+	// but the general performance (stiffness due to the additional algebraic constraints) of this scheme does not justify the effort here.
 	for (unsigned int type = 0; type < _disc.nParType; type++) {
 		if (_disc.parExactInt[type] == false) {
 			LOG(Error) << "No consistent initialization for inexact integration DG discretization in particles (cf. par_exact_integration). If consistent initialization is required, change to exact integration.";
-			// Reset j_f to 0.0 and (only) compute fluxes j_f
-			double* const jf = vecStateY + idxr.offsetJf();
-			std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-			solveForFluxes(vecStateY, idxr);
 			return;
 		}
 	}
@@ -1912,13 +1909,6 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 		} CADET_PARFOR_END;
 	}
 
-	// Step 1b: Compute fluxes j_f
-
-	// Reset j_f to 0.0
-	double* const jf = vecStateY + idxr.offsetJf();
-	std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateY, idxr);
 }
 
 /**
@@ -1992,11 +1982,6 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 	linalg::BandedEigenSparseRowIterator jacBlk(_globalJacDisc, idxr.offsetC());
 	for (unsigned int blk = 0; blk < _disc.nPoints * _disc.nComp; blk++, ++jacBlk)
 		jacBlk[0] = 1.0;
-
-	// set (film) flux dependency for now (needed to apply solver). Fluxes are computed afterwards.
-	linalg::BandedEigenSparseRowIterator jacFilm(_globalJacDisc, idxr.offsetJf());
-	for (unsigned int film = 0; film < _disc.nPoints * _disc.nComp * _disc.nParType; film++, ++jacFilm)
-		jacFilm[0] = 1.0;
 
 	// Process the particle blocks
 #ifdef CADET_PARALLELIZE
@@ -2081,13 +2066,6 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 			LOG(Error) << "Solve() failed";
 		}
 
-	// Step 2b: Solve for fluxes j_f by backward substitution
-
-	// Reset \dot{j}_f to 0.0
-	double* const jfDot = vecStateYdot + idxr.offsetJf();
-	std::fill(jfDot, jfDot + _disc.nComp * _disc.nCol * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateYdot, idxr);
 }
 
 
@@ -2183,13 +2161,6 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 		}
 	}
 
-	// Step 1b: Compute fluxes j_f
-
-	// Reset j_f to 0.0
-	double* const jf = vecStateY + idxr.offsetJf();
-	std::fill(jf, jf + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	solveForFluxes(vecStateY, idxr);
 }
 
 /**
@@ -2644,19 +2615,6 @@ void GeneralRateModelDG::leanConsistentInitialSensitivity(const SimulationTime& 
 	//	// Step 2b: Solve for fluxes j_f by backward substitution
 	//	solveForFluxes(sensYdot, idxr);
 	//}
-}
-
-void GeneralRateModelDG::solveForFluxes(double* const vecState, const Indexer& idxr) const
-{
-	// We have j_f - k_f * (c - c_p) == 0
-	// Thus, jacFC contains -k_f and jacFP +k_f.
-	// We just need to subtract both -k_f * c and k_f * c_p to get j_f == k_f * (c - c_p)
-
-	Eigen::Map<Eigen::VectorXd> flux(reinterpret_cast<double* const>(vecState + idxr.offsetJf()), static_cast<int>(numDofs()) - idxr.offsetJf());
-	Eigen::Map<Eigen::VectorXd> pureState(reinterpret_cast<double* const>(vecState + idxr.offsetC()), idxr.offsetJf() - idxr.offsetC());
-
-	flux = -_globalJac.block(idxr.offsetJf(), idxr.offsetC(), static_cast<int>(numDofs()) - idxr.offsetJf(), idxr.offsetJf() - idxr.offsetC())
-		  * pureState;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -94,9 +94,8 @@ unsigned int GeneralRateModelDG::numDofs() const CADET_NOEXCEPT
 	// Column bulk DOFs: nPoints * nComp
 	// Particle DOFs: nPoints * nParType particles each having nComp (liquid phase) + sum boundStates (solid phase) DOFs
 	//                in each shell; there are nParCell shells for each particle type
-	// Flux DOFs: nCol * nComp * nParType (column bulk DOFs times particle types)
 	// Inlet DOFs: nComp
-	return _disc.nPoints * (_disc.nComp * (1 + _disc.nParType)) + _disc.parTypeOffset[_disc.nParType] + _disc.nComp;
+	return _disc.nPoints * _disc.nComp + _disc.parTypeOffset[_disc.nParType] + _disc.nComp;
 }
 
 unsigned int GeneralRateModelDG::numPureDofs() const CADET_NOEXCEPT
@@ -104,8 +103,7 @@ unsigned int GeneralRateModelDG::numPureDofs() const CADET_NOEXCEPT
 	// Column bulk DOFs: nPoints * nComp
 	// Particle DOFs: nPoints particles each having nComp (liquid phase) + sum boundStates (solid phase) DOFs
 	//                in each shell; there are nPar shells
-	// Flux DOFs: nCol * nComp * nParType (column bulk DOFs times particle types)
-	return _disc.nPoints * (_disc.nComp * (1 + _disc.nParType)) + _disc.parTypeOffset[_disc.nParType];
+	return _disc.nPoints * _disc.nComp  + _disc.parTypeOffset[_disc.nParType];
 }
 
 
@@ -300,11 +298,9 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	for (unsigned int i = 0; i < _disc.nParType; ++i)
 	{
 		if (pdt[i] == "EQUIVOLUME_PAR")
-			throw InvalidParameterException("EQUIVOLUME cell spacing not implemented yet"); //todo?
-			//_parDiscType[i] = ParticleDiscretizationMode::Equivolume;
+			_parDiscType[i] = ParticleDiscretizationMode::Equivolume;
 		else if (pdt[i] == "USER_DEFINED_PAR")
-			throw InvalidParameterException("USER_DEFINED_PAR cell spacing not implemented yet"); // todo?
-			//_parDiscType[i] = ParticleDiscretizationMode::UserDefined;
+			_parDiscType[i] = ParticleDiscretizationMode::UserDefined;
 	}
 
 	// Read particle geometry and default to "SPHERICAL"
@@ -1376,7 +1372,10 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	// Mobile phase RHS
 
 	// get film diffusion flux at current node to compute boundary condition
-	_disc.localFlux = reinterpret_cast<const double*>(yBase) + idxr.offsetJf(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+		_disc.localFlux[comp] = reinterpret_cast<const double*>(yBase)[idxr.offsetC() + colNode * idxr.strideColNode() + comp]
+			                  - reinterpret_cast<const double*>(yBase)[idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + (_disc.nParPoints[parType] - 1) * idxr.strideParNode(parType) + comp];
+	}
 
 	int nNodes = _disc.nParNode[parType];
 	int nCells = _disc.nParCell[parType];
@@ -1485,22 +1484,12 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 
 	// Get offsets
 	ResidualType* const resCol = resBase + idxr.offsetC();
-	ResidualType* const resFlux = resBase + idxr.offsetJf();
-
 	StateType const* const yCol = yBase + idxr.offsetC();
-	StateType const* const yFlux = yBase + idxr.offsetJf();
-
-	// J_f block (identity matrix), adds flux state to flux equation
-	for (unsigned int i = 0; i < _disc.nComp * _disc.nPoints * _disc.nParType; ++i)
-		resFlux[i] = yFlux[i];
 
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
 		ResidualType* const resParType = resBase + idxr.offsetCp(ParticleTypeIndex{type});
-		ResidualType* const resFluxType = resBase + idxr.offsetJf(ParticleTypeIndex{type});
-
 		StateType const* const yParType = yBase + idxr.offsetCp(ParticleTypeIndex{type});
-		StateType const* const yFluxType = yBase + idxr.offsetJf(ParticleTypeIndex{type});
 
 		const ParamType epsP = static_cast<ParamType>(_parPorosity[type]);
 
@@ -1515,37 +1504,17 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 		const ParamType jacCF_val = invBetaC * surfaceToVolumeRatio;
 		const ParamType jacPF_val = -1.0 / epsP;
 
-		// J_{0,f} block, adds flux to column void / bulk volume
+		// Add flux to column void / bulk volume
 		for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
 		{
 			const unsigned int colNode = i / _disc.nComp;
+			const unsigned int comp = i - colNode * _disc.nComp;
 			// + 1/Beta_c * (surfaceToVolumeRatio_{p,j}) * d_j * (k_f * [c_l - c_p])
-			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType])* yFluxType[i];
+			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType]) 
+				        * (yCol[i] - yParType[colNode * idxr.strideParBlock(type) + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type) + comp]);
 		}
 
-		// J_{f,0} block, adds bulk volume state c_i to flux equation
-		for (unsigned int bnd = 0; bnd < _disc.nPoints; ++bnd)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = bnd * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] -= static_cast<ParamType>(filmDiff[comp]) * yCol[eq];
-			}
-		}
-
-		// J_{p,f} block, implements bead boundary condition in outer bead shell equation.
-		// Note that this part is computed in residualParticle().
-
-		// J_{f,p} block, adds outer bead shell state c_{p,i} to flux equation
-		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-		{
-			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-			{
-				const unsigned int eq = pblk * idxr.strideColNode() + comp * idxr.strideColComp();
-				resFluxType[eq] += static_cast<ParamType>(filmDiff[comp])
-					* yParType[(pblk + 1) * idxr.strideParBlock(type) - idxr.strideParNode(type) + comp];
-			}
-		}
+		//  Bead boundary condition is computed in residualParticle().
 
 	}
 
