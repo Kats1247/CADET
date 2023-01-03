@@ -2052,7 +2052,7 @@ protected:
 	}
 
 	/**
-	 * @brief calculates the number of entris for the DG convection dispersion jacobian
+	 * @brief calculates the number of entries for the DG convection dispersion jacobian
 	 * @note only dispersion entries are relevant for jacobian NNZ as the convection entries are a subset of these
 	 */
 	unsigned int nConvDispEntries(bool pureNNZ = false) {
@@ -2861,7 +2861,7 @@ protected:
 	}
 
 	/**
-	 * @brief adds the analytically estimated jacobian entries of the DG jacobian which have been overwritten by the binding kernel (only use for surface diffusion combined with kinetic binding)
+	 * @brief adds jacobian entries which have been overwritten by the binding kernel (only use for surface diffusion combined with kinetic binding)
 	 * @detail only adds the entries d RHS_i / d c^s_i, which lie on the diagonal
 	 * @parType[in] current particle type
 	 * @parSurfDiff[in] pointer to particle surface diffusion at current section and particle type
@@ -4265,16 +4265,16 @@ protected:
 			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCp += _disc.strideBound[type] + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type))
 			{
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacCp, ++jacCl) {
-					// add Cl on Cl entries (added since these entreis are also touched by bulk jacobian)
+					// add Cl on Cl entries (added since these entries are also touched by bulk jacobian)
 					// row: already at bulk phase. already at current node and component.
 					// col: already at bulk phase. already at current node and component.
-					jacCl[0] += (1.0 - static_cast<double>(_colPorosity)) / static_cast<double>(_colPorosity)
+					jacCl[0] += static_cast<double>(filmDiff[comp]) * (1.0 - static_cast<double>(_colPorosity)) / static_cast<double>(_colPorosity)
 								* _parGeomSurfToVol[type] / static_cast<double>(_parRadius[type])
 								* _parTypeVolFrac[type + colNode * _disc.nParType].getValue();
-					// add Cl on Cp entries (added since these entreis are also touched by bulk jacobian)
+					// add Cl on Cp entries (added since these entries are also touched by bulk jacobian)
 					// row: already at bulk phase. already at current node and component.
 					// col: go to current particle phase entry.
-					jacCl[jacCp.row() - jacCl.row()] = -(1.0 - static_cast<double>(_colPorosity)) / static_cast<double>(_colPorosity)
+					jacCl[jacCp.row() - jacCl.row()] = -static_cast<double>(filmDiff[comp]) * (1.0 - static_cast<double>(_colPorosity)) / static_cast<double>(_colPorosity)
 														* _parGeomSurfToVol[type] / static_cast<double>(_parRadius[type])
 														* _parTypeVolFrac[type + colNode * _disc.nParType].getValue();
 
@@ -4282,10 +4282,10 @@ protected:
 					if (!_disc.parExactInt[type]) {
 						// row: already at particle. already at current node and liquid state.
 						// col: already at particle. already at current node and liquid state.
-						jacCp[0] += 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+						jacCp[0] += static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						// row: already at particle. already at current node and liquid state.
 						// col: go to current bulk phase.
-						jacCp[jacCl.row() - jacCp.row()] = -2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+						jacCp[jacCl.row() - jacCp.row()] = -static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvWeights[type][0] / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 					}
 					else {
 						unsigned int entry = jacCp.row();
@@ -4294,12 +4294,12 @@ protected:
 							// col: original entry at outer node.
 							jacCp[entry - jacCp.row()]
 								// note: _disc.Ir[type][_disc.nParNode[type] - 1] is lifting matrix contribution
-							+= 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+							+= static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 							// row: already at particle. Already at current node and liquid state.
 							// col: go to current bulk phase.
 							jacCp[jacCl.row() - jacCp.row()]
 								// note: _disc.Ir[type][_disc.nParNode[type] - 1] is lifting matrix contribution
-								= -2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
+								= -static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						}
 						// set back iterator to first node as required by component loop
 						jacCp += _disc.nParNode[type] * idxr.strideParNode(type);

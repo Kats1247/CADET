@@ -1372,9 +1372,10 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	// Mobile phase RHS
 
 	// get film diffusion flux at current node to compute boundary condition
+	active const* const filmDiff = getSectionDependentSlice(_filmDiffusion, _disc.nComp * _disc.nParType, secIdx) + parType * _disc.nComp;
 	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-		_disc.localFlux[comp] = reinterpret_cast<const double*>(yBase)[idxr.offsetC() + colNode * idxr.strideColNode() + comp]
-			                  - reinterpret_cast<const double*>(yBase)[idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + (_disc.nParPoints[parType] - 1) * idxr.strideParNode(parType) + comp];
+		_disc.localFlux[comp] = static_cast<double>(filmDiff[comp]) * (reinterpret_cast<const double*>(yBase)[idxr.offsetC() + colNode * idxr.strideColNode() + comp]
+			                  - reinterpret_cast<const double*>(yBase)[idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + (_disc.nParPoints[parType] - 1) * idxr.strideParNode(parType) + comp]);
 	}
 
 	int nNodes = _disc.nParNode[parType];
@@ -1510,7 +1511,7 @@ int GeneralRateModelDG::residualFlux(double t, unsigned int secIdx, StateType co
 			const unsigned int colNode = i / _disc.nComp;
 			const unsigned int comp = i - colNode * _disc.nComp;
 			// + 1/Beta_c * (surfaceToVolumeRatio_{p,j}) * d_j * (k_f * [c_l - c_p])
-			resCol[i] += jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType]) 
+			resCol[i] += static_cast<double>(filmDiff[comp]) * jacCF_val * static_cast<ParamType>(_parTypeVolFrac[type + colNode * _disc.nParType])
 				        * (yCol[i] - yParType[colNode * idxr.strideParBlock(type) + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type) + comp]);
 		}
 
