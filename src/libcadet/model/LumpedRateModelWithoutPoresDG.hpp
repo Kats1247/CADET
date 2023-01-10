@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "Benchmark.hpp"
-#include <numbers>
+//#include <numbers>
 
 #include <Eigen/Dense> // use LA lib Eigen for Matrix operations
 #include <Eigen/Sparse>
@@ -222,6 +222,9 @@ protected:
 		Eigen::VectorXd invWeights; //!< Array with weights for numerical quadrature of size nNodes
 		Eigen::MatrixXd invMM; //!< dense inverse mass matrix for exact integration
 
+		Eigen::MatrixXd* DGjacAxDispBlocks; //!< axial dispersion blocks of DG jacobian (unique blocks only)
+		Eigen::MatrixXd DGjacAxConvBlock; //!< axial convection block of DG jacobian
+
 		unsigned int* nBound; //!< Array with number of bound states for each component
 		unsigned int* boundOffset; //!< Array with offset to the first bound state of each component in the solid phase
 		unsigned int strideBound; //!< Total number of bound states
@@ -235,7 +238,6 @@ protected:
 
 		double length_;
 		double porosity;
-		// Section dependent parameters
 
 		Eigen::VectorXd g; //!< auxiliary variable
 		Eigen::VectorXd h; //!< auxiliary substitute
@@ -276,6 +278,24 @@ protected:
 			lglNodesWeights();
 			invMMatrix();
 			derivativeMatrix();
+		}
+
+		void initializeDGjac() {
+			DGjacAxDispBlocks = new MatrixXd[(exactInt ? std::min(nCol, 5u) : std::min(nCol, 3u))];
+			// we only need unique dispersion blocks, which are given by cells 1, 2, nCol for inexact integration DG and by cells 1, 2, 3, nCol-1, nCol for eaxct integration DG
+			DGjacAxDispBlocks[0] = DGjacobianDispBlock(1);
+			if(nCol > 1)
+				DGjacAxDispBlocks[1] = DGjacobianDispBlock(2);
+			if (nCol > 2 && exactInt)
+				DGjacAxDispBlocks[2] = DGjacobianDispBlock(3);
+			else if(nCol > 2 && !exactInt)
+				DGjacAxDispBlocks[2] = DGjacobianDispBlock(nCol);
+			if (exactInt && nCol > 3)
+				DGjacAxDispBlocks[3] = DGjacobianDispBlock(std::max(4u, nCol - 1u));
+			if (exactInt && nCol > 4)
+				DGjacAxDispBlocks[4] = DGjacobianDispBlock(nCol);
+
+			DGjacAxConvBlock = DGjacobianConvBlock();
 		}
 
 	private:
@@ -446,7 +466,6 @@ protected:
 
 			return V;
 		}
-
 		/**
 		* @brief calculates mass matrix for exact polynomial integration
 		* @detail exact polynomial integration leads to a full mass matrix
@@ -454,7 +473,190 @@ protected:
 		void invMMatrix() {
 			invMM = (getVandermonde_LEGENDRE() * (getVandermonde_LEGENDRE().transpose()));
 		}
+		/**
+		 * @brief calculates the convection part of the DG jacobian
+		 */
+		MatrixXd DGjacobianConvBlock() {
 
+			// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
+			MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
+			convBlock.block(0, 1, nNodes, nNodes) -= polyDerM;
+
+			if (exactInt) {
+				convBlock.block(0, 0, nNodes, 1) += invMM.block(0, 0, nNodes, 1);
+				convBlock.block(0, 1, nNodes, 1) -= invMM.block(0, 0, nNodes, 1);
+			}
+			else {
+				convBlock(0, 0) += invWeights[0];
+				convBlock(0, 1) -= invWeights[0];
+			}
+			convBlock *= 2 * velocity / deltaZ;
+
+			return convBlock;
+		}
+		/**
+		 * @brief calculates the DG Jacobian auxiliary block
+		 * @param [in] exInt true if exact integration DG scheme
+		 * @param [in] cellIdx cell index
+		 */
+		MatrixXd getGBlock(unsigned int cellIdx) {
+
+			// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
+			MatrixXd gBlock = MatrixXd::Zero(nNodes, nNodes + 2);
+			gBlock.block(0, 1, nNodes, nNodes) = polyDerM;
+			if (exactInt) {
+				if (cellIdx != 1 && cellIdx != nCol) {
+					gBlock.block(0, 0, nNodes, 1) -= 0.5 * invMM.block(0, 0, nNodes, 1);
+					gBlock.block(0, 1, nNodes, 1) += 0.5 * invMM.block(0, 0, nNodes, 1);
+					gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
+					gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
+				}
+				else if (cellIdx == 1) { // left
+					if (cellIdx == nCol)
+						return gBlock * 2 / deltaZ;
+					;
+					gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
+					gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
+				}
+				else if (cellIdx == nCol) { // right
+					gBlock.block(0, 0, nNodes, 1) -= 0.5 * invMM.block(0, 0, nNodes, 1);
+					gBlock.block(0, 1, nNodes, 1) += 0.5 * invMM.block(0, 0, nNodes, 1);
+				}
+				else if (cellIdx == 0 || cellIdx == nCol + 1) {
+					gBlock.setZero();
+				}
+				gBlock *= 2 / deltaZ;
+			}
+			else {
+				if (cellIdx == 0 || cellIdx == nCol + 1)
+					return MatrixXd::Zero(nNodes, nNodes + 2);
+
+				gBlock(0, 0) -= 0.5 * invWeights[0];
+				gBlock(0, 1) += 0.5 * invWeights[0];
+				gBlock(nNodes - 1, nNodes) -= 0.5 * invWeights[nNodes - 1];
+				gBlock(nNodes - 1, nNodes + 1) += 0.5 * invWeights[nNodes - 1];
+				gBlock *= 2 / deltaZ;
+
+				if (cellIdx == 1) {
+					// adjust auxiliary Block [ d g(c) / d c ] for left boundary cell
+					gBlock(0, 1) -= 0.5 * invWeights[0] * 2 / deltaZ;
+					if (cellIdx == nCol) { // adjust for special case one cell
+						gBlock(0, 0) += 0.5 * invWeights[0] * 2 / deltaZ;
+						gBlock(nNodes - 1, nNodes + 1) -= 0.5 * invWeights[nNodes - 1] * 2 / deltaZ;
+						gBlock(nNodes - 1, nNodes) += 0.5 * invWeights[polyDeg] * 2 / deltaZ;
+					}
+				}
+				else if (cellIdx == nCol) {
+					// adjust auxiliary Block [ d g(c) / d c ] for right boundary cell
+					gBlock(nNodes - 1, nNodes) += 0.5 * invWeights[polyDeg] * 2 / deltaZ;
+				}
+			}
+
+			return gBlock;
+		}
+		/**
+		 * @brief calculates the num. flux part of a dispersion DG Jacobian block
+		 * @param [in] cellIdx cell index
+		 * @param [in] leftG left neighbour auxiliary block
+		 * @param [in] middleG neighbour auxiliary block
+		 * @param [in] rightG neighbour auxiliary block
+		 */
+		Eigen::MatrixXd auxBlockGstar(unsigned int cellIdx, MatrixXd leftG, MatrixXd middleG, MatrixXd rightG) {
+			
+			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
+			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+			// NOTE: N = polyDeg
+			// indices  gStarDC    :     0   ,   1   , ..., nNodes; nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
+			// derivative index j  : -(N+1)-1, -(N+1),... ,  -1   ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
+			// auxiliary block [d g^* / d c]
+			if (cellIdx != 1) {
+				gStarDC.block(0, nNodes, 1, nNodes + 2) += middleG.block(0, 0, 1, nNodes + 2);
+				gStarDC.block(0, 0, 1, nNodes + 2) += leftG.block(nNodes - 1, 0, 1, nNodes + 2);
+			}
+			if (cellIdx != nCol) {
+				gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += middleG.block(nNodes - 1, 0, 1, nNodes + 2);
+				gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += rightG.block(0, 0, 1, nNodes + 2);
+			}
+			gStarDC *= 0.5;
+
+			return gStarDC;
+		}
+
+		Eigen::MatrixXd getBMatrix() {
+
+			MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
+			B(0, 0) = -1.0;
+			B(nNodes - 1, nNodes - 1) = 1.0;
+
+			return B;
+		}
+
+		/**
+		 * @brief calculates the dispersion part of the DG jacobian
+		 * @param [in] exInt true if exact integration DG scheme
+		 * @param [in] cellIdx cell index
+		 */
+		MatrixXd DGjacobianDispBlock(unsigned int cellIdx) {
+
+			int sNode = nComp + strideBound;
+			int sCell = sNode * nNodes;
+			int sComp = 1;
+			int offC = 0; // inlet DOFs not included in Jacobian
+
+			MatrixXd dispBlock;
+
+			if (exactInt) {
+
+				// Inner dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
+				dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
+
+				MatrixXd B = getBMatrix(); // "Lifting" matrix
+				MatrixXd gBlock = getGBlock(cellIdx); // current cell auxiliary block matrix
+				MatrixXd gStarDC = auxBlockGstar(cellIdx, getGBlock(cellIdx - 1), gBlock, getGBlock(cellIdx + 1)); // Numerical flux block
+
+				//  indices  dispBlock :   0	 ,   1   , ..., nNodes;	nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
+				//	derivative index j  : -(N+1)-1, -(N+1),...,	 -1	  ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
+				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += polyDerM * gBlock - invMM * B * gBlock;
+				dispBlock += invMM * B * gStarDC;
+				dispBlock *= 2 / deltaZ;
+			}
+			else { // inexact integration collocation DGSEM
+
+				dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes);
+				MatrixXd GBlockLeft = getGBlock(cellIdx - 1);
+				MatrixXd GBlock = getGBlock(cellIdx);
+				MatrixXd GBlockRight = getGBlock(cellIdx + 1);
+
+				// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell
+				// NOTE: N = polyDeg
+				// cell indices :  0  , ..., nNodes - 1;	nNodes, ..., 2 * nNodes - 1;	2 * nNodes, ..., 3 * nNodes - 1
+				//			 j  : -N-1, ..., -1		  ; 0     , ..., N			   ;	N + 1, ..., 2N + 1
+				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = polyDerM * GBlock;
+
+				if (cellIdx > 1) {
+					dispBlock(0, nNodes - 1) += -invWeights[0] * (-0.5 * GBlock(0, 0) + 0.5 * GBlockLeft(nNodes - 1, nNodes)); // G_N,N		i=0, j=-1
+					dispBlock(0, nNodes) += -invWeights[0] * (-0.5 * GBlock(0, 1) + 0.5 * GBlockLeft(nNodes - 1, nNodes + 1)); // G_N,N+1	i=0, j=0
+					dispBlock.block(0, nNodes + 1, 1, nNodes) += -invWeights[0] * (-0.5 * GBlock.block(0, 2, 1, nNodes)); // G_i,j		i=0, j=1,...,N+1
+					dispBlock.block(0, 0, 1, nNodes - 1) += -invWeights[0] * (0.5 * GBlockLeft.block(nNodes - 1, 1, 1, nNodes - 1)); // G_N,j+N+1		i=0, j=-N-1,...,-2
+				}
+				else if (cellIdx == 1) { // left boundary cell
+					dispBlock.block(0, nNodes - 1, 1, nNodes + 2) += -invWeights[0] * (-GBlock.block(0, 0, 1, nNodes + 2)); // G_N,N		i=0, j=-1,...,N+1
+				}
+				if (cellIdx < nCol) {
+					dispBlock.block(nNodes - 1, nNodes - 1, 1, nNodes) += invWeights[nNodes - 1] * (-0.5 * GBlock.block(nNodes - 1, 0, 1, nNodes)); // G_i,j+N+1		i=N, j=-1,...,N-1
+					dispBlock(nNodes - 1, 2 * nNodes - 1) += invWeights[nNodes - 1] * (-0.5 * GBlock(nNodes - 1, nNodes) + 0.5 * GBlockRight(0, 0)); // G_i,j		i=N, j=N
+					dispBlock(nNodes - 1, 2 * nNodes) += invWeights[nNodes - 1] * (-0.5 * GBlock(nNodes - 1, nNodes + 1) + 0.5 * GBlockRight(0, 1)); // G_i,j		i=N, j=N+1
+					dispBlock.block(nNodes - 1, 2 * nNodes + 1, 1, nNodes - 1) += invWeights[nNodes - 1] * (0.5 * GBlockRight.block(0, 2, 1, nNodes - 1)); // G_0,j-N-1		i=N, j=N+2,...,2N+1
+				}
+				else if (cellIdx == nCol) { // right boundary cell
+					dispBlock.block(nNodes - 1, nNodes - 1, 1, nNodes + 2) += invWeights[nNodes - 1] * (-GBlock.block(nNodes - 1, 0, 1, nNodes + 2)); // G_i,j+N+1		i=N, j=--1,...,N+1
+				}
+
+				dispBlock *= 2 / deltaZ;
+			}
+
+			return dispBlock;
+		}
 	};
 
 	Discretization _disc; //!< Discretization info
@@ -471,7 +673,7 @@ protected:
 	Eigen::SparseMatrix<double, RowMajor> _jac; //!< Jacobian
 	Eigen::SparseMatrix<double, RowMajor> _jacDisc; //!< Jacobian with time derivatives from BDF method
 	Eigen::MatrixXd _jacInlet; //!< Jacobian inlet DOF block matrix connects inlet DOFs to first bulk cells
-	MatrixXd FDjac; // todo delete!
+	//MatrixXd FDjac; // todo delete!
 
 	active _totalPorosity; //!< Total porosity \f$ \varepsilon_t \f$
 
@@ -1235,9 +1437,9 @@ protected:
 	}
 
 	/**
-	* @brief calculates the number of non zeros for the DG convection dispersion jacobian
-	* @detail only dispersion entries are relevant as the convection entries are a subset of these
-	*/
+	 * @brief calculates the number of non zeros for the DG convection dispersion jacobian
+	 * @detail only dispersion entries are relevant as the convection entries are a subset of these
+	 */
 	unsigned int calcConvDispNNZ(Discretization disc) {
 
 		if (disc.exactInt) {
@@ -1247,7 +1449,6 @@ protected:
 			return disc.nComp * (disc.nCol * disc.nNodes * disc.nNodes + 8u * disc.nNodes);
 		}
 	}
-
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
 	*/
@@ -1271,33 +1472,8 @@ protected:
 
 		/*		Inner cell dispersion blocks		*/
 
-		// auxiliary Block for [ d g(c) / d c ], needed in Dispersion block
-		MatrixXd GBlock = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlock.block(0, 1, nNodes, nNodes) = _disc.polyDerM;
-		GBlock(0, 0) -= 0.5 * _disc.invWeights[0];
-		GBlock(0, 1) += 0.5 * _disc.invWeights[0];
-		GBlock(nNodes - 1, nNodes) -= 0.5 * _disc.invWeights[polyDeg];
-		GBlock(nNodes - 1, nNodes + 1) += 0.5 * _disc.invWeights[polyDeg];
-		GBlock *= 2 / _disc.deltaZ;
-
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes); //
-		// NOTE: N = polyDeg
-		//cell indices : 0	 , ..., nNodes - 1;	nNodes, ..., 2 * nNodes - 1;	2 * nNodes, ..., 3 * nNodes - 1
-		//			j  : -N-1, ..., -1		  ; 0     , ..., N			   ;	N + 1, ..., 2N + 1
-		dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = _disc.polyDerM * GBlock;
-		dispBlock(0, nNodes - 1) += -_disc.invWeights[0] * (-0.5 * GBlock(0, 0) + 0.5 * GBlock(nNodes - 1, nNodes)); // G_N,N		i=0, j=-1
-		dispBlock(0, nNodes) += -_disc.invWeights[0] * (-0.5 * GBlock(0, 1) + 0.5 * GBlock(nNodes - 1, nNodes + 1)); // G_N,N+1	i=0, j=0
-		dispBlock.block(0, nNodes + 1, 1, nNodes) += -_disc.invWeights[0] * (-0.5 * GBlock.block(0, 2, 1, nNodes)); // G_i,j		i=0, j=1,...,N+1
-		dispBlock.block(0, 0, 1, nNodes - 1) += -_disc.invWeights[0] * (0.5 * GBlock.block(nNodes - 1, 1, 1, nNodes - 1)); // G_N,j+N+1		i=0, j=-N-1,...,-2
-		dispBlock.block(nNodes - 1, nNodes - 1, 1, nNodes) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlock.block(nNodes - 1, 0, 1, nNodes)); // G_i,j+N+1		i=N, j=--1,...,N-1
-		dispBlock(nNodes - 1, 2 * nNodes - 1) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlock(nNodes - 1, nNodes) + 0.5 * GBlock(0, 0)); // G_i,j		i=N, j=N
-		dispBlock(nNodes - 1, 2 * nNodes) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlock(nNodes - 1, nNodes + 1) + 0.5 * GBlock(0, 1)); // G_i,j		i=N, j=N+1
-		dispBlock.block(nNodes - 1, 2 * nNodes + 1, 1, nNodes - 1) += _disc.invWeights[nNodes - 1] * (0.5 * GBlock.block(0, 2, 1, nNodes - 1)); // G_0,j-N-1		i=N, j=N+2,...,2N+1
-		dispBlock *= 2 / _disc.deltaZ;
-
-		// insert Blocks to Jacobian inner cells (only for nCells >= 3)
 		if (nCells >= 3u) {
+			MatrixXd dispBlock = _disc.DGjacAxDispBlocks[1];
 			for (unsigned int cell = 1; cell < nCells - 1; cell++) {
 				for (unsigned int comp = 0; comp < nComp; comp++) {
 					for (unsigned int i = 0; i < dispBlock.rows(); i++) {
@@ -1320,19 +1496,8 @@ protected:
 		/*				Boundary cell Dispersion blocks			*/
 
 		/* left cell */
-		// adjust auxiliary Block [ d g(c) / d c ] for left boundary cell
-		MatrixXd GBlockBound = GBlock;
-		GBlockBound(0, 1) -= 0.5 * _disc.invWeights[0] * 2 / _disc.deltaZ;
+		MatrixXd dispBlock = _disc.DGjacAxDispBlocks[0];
 
-		// estimate dispersion block ( j < 0 not needed)
-		dispBlock.setZero();
-		dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = _disc.polyDerM * GBlockBound;
-		dispBlock.block(0, nNodes - 1, 1, nNodes + 2) += -_disc.invWeights[0] * (-GBlockBound.block(0, 0, 1, nNodes + 2)); // G_N,N		i=0, j=-1,...,N+1
-		dispBlock.block(nNodes - 1, nNodes - 1, 1, nNodes) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlockBound.block(nNodes - 1, 0, 1, nNodes)); // G_i,j+N+1		i=N, j=--1,...,N-1
-		dispBlock(nNodes - 1, 2 * nNodes - 1) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlockBound(nNodes - 1, nNodes) + 0.5 * GBlockBound(0, 0)); // G_i,j		i=N, j=N
-		dispBlock(nNodes - 1, 2 * nNodes) += _disc.invWeights[nNodes - 1] * (-0.5 * GBlockBound(nNodes - 1, nNodes + 1) + 0.5 * GBlock(0, 1)); // G_i,j		i=N, j=N+1
-		dispBlock.block(nNodes - 1, 2 * nNodes + 1, 1, nNodes - 1) += _disc.invWeights[nNodes - 1] * (0.5 * GBlock.block(0, 2, 1, nNodes - 1)); // G_0,j-N-1		i=N, j=N+2,...,2N+1
-		dispBlock *= 2 / _disc.deltaZ;
 		if (nCells != 1u) { // "standard" case
 			// copy *-1 to Jacobian
 			for (unsigned int comp = 0; comp < nComp; comp++) {
@@ -1350,18 +1515,13 @@ protected:
 			}
 		}
 		else { // special case
-			dispBlock.setZero();
-			MatrixXd GBlock1Cell = _disc.polyDerM * 2.0 / _disc.deltaZ;
-			dispBlock.block(0, nNodes, nNodes, nNodes) = _disc.polyDerM * GBlock1Cell;
-			dispBlock.block(0, nNodes, 1, nNodes) += _disc.invWeights[0] * GBlock1Cell.block(0, 0, 1, nNodes);
-			dispBlock.block(nNodes - 1, nNodes, 1, nNodes) -= _disc.invWeights[_disc.polyDeg] * GBlock1Cell.block(nNodes - 1, 0, 1, nNodes);
-			dispBlock *= 2.0 / _disc.deltaZ;
+
 			// copy *-1 to Jacobian
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes; j < nNodes * 2u; j++) {
 						_jac.coeffRef(offC + comp * sComp + i * sNode,
-							offC + comp * sComp + (j - nNodes) * sNode)
+									  offC + comp * sComp + (j - nNodes) * sNode)
 							= -dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
@@ -1370,43 +1530,31 @@ protected:
 
 		/* right cell */
 		if (nCells != 1u) { // "standard" case
-	   // adjust auxiliary Block [ d g(c) / d c ] for left boundary cell
-		GBlockBound(0, 1) += 0.5 * _disc.invWeights[0] * 2 / _disc.deltaZ; 	// reverse change from left boundary
-		GBlockBound(nNodes - 1, nNodes) += 0.5 * _disc.invWeights[polyDeg] * 2 / _disc.deltaZ;
 
-		// estimate dispersion block (only estimation differences to inner cell at N = 0 and j > N not needed)
-		dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = _disc.polyDerM * GBlockBound;
-		dispBlock(0, nNodes - 1) += -_disc.invWeights[0] * (-0.5 * GBlockBound(0, 0) + 0.5 * GBlock(nNodes - 1, nNodes)); // G_N,N		i=0, j=-1
-		dispBlock(0, nNodes) += -_disc.invWeights[0] * (-0.5 * GBlockBound(0, 1) + 0.5 * GBlock(nNodes - 1, nNodes + 1)); // G_N,N+1	i=0, j=0
-		dispBlock.block(0, nNodes + 1, 1, nNodes) += -_disc.invWeights[0] * (-0.5 * GBlockBound.block(0, 2, 1, nNodes)); // G_i,j		i=0, j=1,...,N+1
-		dispBlock.block(0, 0, 1, nNodes - 1) += -_disc.invWeights[0] * (0.5 * GBlock.block(nNodes - 1, 1, 1, nNodes - 1)); // G_N,j+N+1		i=0, j=-N-1,...,-2
-		dispBlock.block(nNodes - 1, nNodes - 1, 1, nNodes + 2) += _disc.invWeights[nNodes - 1] * (-GBlockBound.block(nNodes - 1, 0, 1, nNodes + 2)); // G_i,j+N+1		i=N, j=--1,...,N+1
-		dispBlock *= 2 / _disc.deltaZ;
-		// copy *-1 to Jacobian
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-				for (unsigned int j = 0; j < 2 * nNodes; j++) {
-					// pattern is more sparse than a nNodes x 2*nNodes block.
-					if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
-						(i == 0 && j <= 2 * nNodes) ||
-						(i == nNodes - 1 && j >= nNodes - 1))
-						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-									  offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
-									= -dispBlock(i, j) * _disc.dispersion[comp];
+			dispBlock = _disc.DGjacAxDispBlocks[std::min(nCells, 3u) - 1];
+
+			// copy *-1 to Jacobian
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+					for (unsigned int j = 0; j < 2 * nNodes; j++) {
+						// pattern is more sparse than a nNodes x 2*nNodes block.
+						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
+							(i == 0 && j <= 2 * nNodes) ||
+							(i == nNodes - 1 && j >= nNodes - 1))
+							_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+										  offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
+							= -dispBlock(i, j) * _disc.dispersion[comp];
+					}
 				}
 			}
-		}
 		} // "standard" case
+
 		/*======================================================*/
 		/*			Compute Convection Jacobian Block			*/
 		/*======================================================*/
 
 		// Convection block [ d RHS_conv / d c ], also depends on first entry of previous cell
-		MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
-		convBlock.block(0, 1, nNodes, nNodes) -= _disc.polyDerM;
-		convBlock(0, 0) += _disc.invWeights[0];
-		convBlock(0, 1) -= _disc.invWeights[0];
-		convBlock *= 2 * _disc.velocity / _disc.deltaZ;
+		MatrixXd convBlock = _disc.DGjacAxConvBlock;
 
 		// special inlet DOF treatment for first cell
 		_jacInlet(0, 0) = -convBlock(0, 0); // only first node depends on inlet concentration
@@ -1436,288 +1584,6 @@ protected:
 
 		return 0;
 	}
-
-	Eigen::MatrixXd getGBlock() {
-
-		int nNodes = _disc.nNodes;
-		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = MatrixXd::Zero(nNodes, nNodes + 2);
-		gBlock.block(0, 1, nNodes, nNodes) = _disc.polyDerM;
-		gBlock.block(0, 0, nNodes, 1) -= 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		gBlock.block(0, 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		gBlock *= 2 / _disc.deltaZ;
-
-		return gBlock;
-	}
-
-	Eigen::MatrixXd getBMatrix() {
-
-		MatrixXd B = MatrixXd::Zero(_disc.nNodes, _disc.nNodes);
-		B(0, 0) = -1.0;
-		B(_disc.nNodes - 1, _disc.nNodes - 1) = 1.0;
-
-		return B;
-	}
-
-	Eigen::MatrixXd innerCellBlock() {
-
-		int nNodes = _disc.nNodes;
-		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = getGBlock();
-
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-
-		// Inner dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		// NOTE: N = polyDeg
-		// indices  gStarDC    :     0   ,   1   , ..., nNodes; nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
-		// derivative index j  : -(N+1)-1, -(N+1),... ,  -1   ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
-		// auxiliary block [d g^* / d c]
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-
-		//  indices  dispBlock :   0	 ,   1   , ..., nNodes;	nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
-		//	derivative index j  : -(N+1)-1, -(N+1),...,	 -1	  ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * gBlock - _disc.invMM * B * gBlock;
-		dispBlock += _disc.invMM * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd leftBndryCellNghbrBlock() {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * gBlock - _disc.invMM * B * gBlock;
-		dispBlock += _disc.invMM * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd rightBndryCellNghbrBlock() {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * gBlock - _disc.invMM * B * gBlock;
-		dispBlock += _disc.invMM * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd leftBndryCellBlock() {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * GBlockBound_l - _disc.invMM * B * GBlockBound_l;
-		dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.invMM * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd rightBndryCellBlock() {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * GBlockBound_r - _disc.invMM * B * GBlockBound_r;
-		dispBlock += _disc.invMM * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd getConvBlock() {
-
-		int nNodes = _disc.nNodes;
-		// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
-		MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
-		convBlock.block(0, 0, nNodes, 1) += _disc.invMM.block(0, 0, nNodes, 1);
-		convBlock.block(0, 1, nNodes, nNodes) -= _disc.polyDerM;
-		convBlock.block(0, 1, nNodes, 1) -= _disc.invMM.block(0, 0, nNodes, 1);
-		convBlock *= 2 * _disc.velocity / _disc.deltaZ;
-
-		return convBlock;
-	}
-
-	Eigen::MatrixXd specialBlockOneCell() {
-
-		int nNodes = _disc.nNodes;
-		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = MatrixXd::Zero(nNodes, nNodes + 2);
-		gBlock.block(0, 1, nNodes, nNodes) = _disc.polyDerM;
-		gBlock *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ] equals zero.
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * gBlock - _disc.invMM * B * gBlock;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd specialBlockTwoCells(bool right) {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaZ;
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaZ;
-
-		if (right) { // right boundary cell
-
-			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			gStarDC *= 0.5;
-			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * GBlockBound_r - _disc.invMM * B * GBlockBound_r;
-			dispBlock += _disc.invMM * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaZ;
-
-			return dispBlock;
-		}
-		else { // left boundary cell
-
-			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			gStarDC *= 0.5;
-			// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * GBlockBound_l - _disc.invMM * B * GBlockBound_l;
-			dispBlock += _disc.invMM * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaZ;
-		
-			return dispBlock;
-		}
-	}
-
-	Eigen::MatrixXd specialBlockThreeCells() {
-
-		int nNodes = _disc.nNodes;
-		MatrixXd gBlock = getGBlock();
-		// B matrix from DG scheme
-		MatrixXd B = getBMatrix();
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaZ;
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.polyDerM;
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.invMM.block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaZ;
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.polyDerM * gBlock - _disc.invMM * B * gBlock;
-		dispBlock += _disc.invMM * B * gStarDC;
-		dispBlock *= 2 / _disc.deltaZ;
-
-		return dispBlock;
-	}
-
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the exact integration (here: modal) DG scheme
 	*/
@@ -1744,7 +1610,7 @@ protected:
 		/* Inner cells (exist only if nCells >= 5) */
 		if (nCells >= 5) {
 
-			dispBlock = innerCellBlock();
+			dispBlock = _disc.DGjacAxDispBlocks[2]; // inner cells
 
 			for (unsigned int cell = 2; cell < nCells - 2; cell++) {
 				for (unsigned int comp = 0; comp < nComp; comp++) {
@@ -1764,9 +1630,8 @@ protected:
 
 		/*	boundary cell neighbours (exist only if nCells >= 4)	*/
 		if (nCells >= 4) {
-			// left boundary cell neighbour
 
-			dispBlock = leftBndryCellNghbrBlock();
+			dispBlock = _disc.DGjacAxDispBlocks[1]; // left boundary cell neighbour
 
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
@@ -1780,9 +1645,7 @@ protected:
 				}
 			}
 
-			// right boundary cell neighbour
-
-			dispBlock = rightBndryCellNghbrBlock();
+			dispBlock = _disc.DGjacAxDispBlocks[nCells > 4 ? 3 : 2]; // right boundary cell neighbour
 
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
@@ -1800,9 +1663,9 @@ protected:
 
 		/*			boundary cells (exist only if nCells >= 3)			*/
 		if (nCells >= 3) {
-			// left boundary cell
 
-			dispBlock = leftBndryCellBlock();
+			dispBlock = _disc.DGjacAxDispBlocks[0]; // left boundary cell
+
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes + 1; j < dispBlock.cols(); j++) {
@@ -1815,9 +1678,7 @@ protected:
 				}
 			}
 
-			// right boundary cell
-
-			dispBlock = rightBndryCellBlock();
+			dispBlock = _disc.DGjacAxDispBlocks[std::min(nCells, 5u) - 1u]; // right boundary cell
 
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
@@ -1835,7 +1696,7 @@ protected:
 		/* For special cases nCells = 1, 2, 3, some cells still have to be treated separately*/
 
 		if (nCells == 1) {
-			dispBlock = specialBlockOneCell();
+			dispBlock = _disc.DGjacAxDispBlocks[0];
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes + 1; j < 2 * nNodes + 1; j++) {
@@ -1849,7 +1710,7 @@ protected:
 			}
 		}
 		else if (nCells == 2) {
-			dispBlock = specialBlockTwoCells(0); // get left boundary cell
+			dispBlock = _disc.DGjacAxDispBlocks[0];// get left boundary cell
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = nNodes + 1; j < 3 * nNodes + 1; j++) {
@@ -1861,7 +1722,7 @@ protected:
 					}
 				}
 			}
-			dispBlock = specialBlockTwoCells(1); // get right boundary cell
+			dispBlock = _disc.DGjacAxDispBlocks[1];// get right boundary cell
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = 1; j < 2 * nNodes + 1; j++) {
@@ -1875,7 +1736,7 @@ protected:
 			}
 		}
 		else if (nCells == 3) {
-			dispBlock = specialBlockThreeCells();
+			dispBlock = _disc.DGjacAxDispBlocks[1];
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
 					for (unsigned int j = 1; j < dispBlock.cols() - 1; j++) {
@@ -1893,31 +1754,27 @@ protected:
 		/*			Compute Convection Jacobian Block			*/
 		/*======================================================*/
 
-		// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
-		MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
-		convBlock = getConvBlock();
-
 		// special inlet DOF treatment for first cell
-		_jacInlet = -convBlock.col(0); // only first cell depends on inlet concentration
+		_jacInlet = -_disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
 		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < convBlock.rows(); i++) {
+			for (unsigned int i = 0; i < _disc.DGjacAxConvBlock.rows(); i++) {
 				//_jac.coeffRef(offC + comp * sComp + i * sNode, comp * sComp) = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
-				for (unsigned int j = 1; j < convBlock.cols(); j++) {
+				for (unsigned int j = 1; j < _disc.DGjacAxConvBlock.cols(); j++) {
 					_jac.coeffRef(offC + comp * sComp + i * sNode,
 								  offC + comp * sComp + (j - 1) * sNode)
-								  -= convBlock(i, j);
+								  -= _disc.DGjacAxConvBlock(i, j);
 				}
 			}
 		}
 		for (unsigned int cell = 1; cell < nCells; cell++) {
 			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < convBlock.rows(); i++) {
-					for (unsigned int j = 0; j < convBlock.cols(); j++) {
+				for (unsigned int i = 0; i < _disc.DGjacAxConvBlock.rows(); i++) {
+					for (unsigned int j = 0; j < _disc.DGjacAxConvBlock.cols(); j++) {
 						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
 						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
 						_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
 									  offC + cell * sCell - sNode + comp * sComp + j * sNode)
-									  -= convBlock(i, j);
+									  -= _disc.DGjacAxConvBlock(i, j);
 					}
 				}
 			}

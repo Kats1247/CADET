@@ -282,6 +282,10 @@ namespace cadet
 
 			//FDjac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete!
 
+			// compute DG Jaconian blocks
+			updateSection(0);
+			_disc.initializeDGjac();
+
 			return bindingConfSuccess && reactionConfSuccess;
 		}
 
@@ -842,16 +846,16 @@ namespace cadet
 
 			// todo delete debug code jacobian
 			////std::cout << std::fixed << std::setprecision(3) << "FD jac:" << std::endl;
-			////std::cout << FDjac << std::endl;
+			////std::cout << FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
 			////std::cout << "analytical jac:" << std::endl;
 			////std::cout << _jacDisc.toDense() << std::endl;
 			//bool equal = (_jacDisc.toDense().isApprox(FDjac.block(1, 1, numPureDofs(), numPureDofs()), 1e-10));
 			//std::cout << "equal: " << equal << std::endl;
 			//std::cout << "max deviation: " << std::setprecision(10) << (_jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs())).maxCoeff() << std::endl;
-			////std::cout << "deviation pattern:\n" << std::setprecision(3) << _jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
+			////std::cout << "deviation pattern:\n" << std::setprecision(4) << _jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
 
 			// solve J x = rhs
-			Eigen::Map<VectorXd> r(rhs, numDofs());
+			Eigen::Map<VectorXd> r(rhs, numDofs()); 
 
 			// todo iterative solver?
 			//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> solver;
