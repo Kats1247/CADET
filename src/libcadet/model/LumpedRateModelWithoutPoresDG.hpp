@@ -971,7 +971,7 @@ protected:
 	* @brief calculates the substitute h = vc - sqrt(D_ax) g(c)
 	*/
 	void calcH(Eigen::Map<const VectorXd, 0, InnerStride<>>& C, unsigned int Comp) {
-		_disc.h = -_disc.velocity * C + std::sqrt(_disc.dispersion[Comp]) * _disc.g;
+		_disc.h = _disc.velocity * C - std::sqrt(_disc.dispersion[Comp]) * _disc.g;
 	}
 
 	/**
@@ -1042,7 +1042,7 @@ protected:
 		// solve main equation w_t = d h / d x   //
 		// ======================================//
 
-		calcH(C, Comp); // calculate the (residual, i.e. *-1) substitute h(S(c), c) = - (sqrt(D_ax) g(c) - v c)
+		calcH(C, Comp); // calculate the substitute h(S(c), c) = - (sqrt(D_ax) g(c) - v c)
 
 		volumeIntegral(h, resC); // DG volumne integral in strong form
 

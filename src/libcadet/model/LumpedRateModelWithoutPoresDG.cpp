@@ -614,27 +614,6 @@ namespace cadet
 				
 			}
 
-			// ==================================================//
-			//	Estimate Convection Dispersion residual			//
-			// ================================================//
-
-			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-
-				// extract current component mobile phase, mobile phase residual, mobile phase derivative (discontinous memory blocks)
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> C_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-				Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		cRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
-				/*	convection dispersion RHS	*/
-
-				_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
-				ConvDisp_DG(C_comp, cRes_comp, t, comp);
-
-				/*	residual	*/
-
-				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
-			}
-
 			// ==========================================//
 			// Estimate binding, reactions Residual		 //
 			// ==========================================//
@@ -667,11 +646,41 @@ namespace cadet
 				// position of current column node (z coordinate) - needed in externally dependent adsorption kinetic
 				double z = _disc.deltaZ * std::floor(blk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[blk % _disc.nNodes]);
 
-				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
+				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, false>(
 					t, secIdx, ColumnPosition{ z, 0.0, 0.0 }, localY, localYdot, localRes, jacIt, cellResParams, threadLocalMem.get()
 					);
 
 			} CADET_PARFOR_END;
+
+			// ==================================================//
+			//	Estimate Convection Dispersion residual			//
+			// ================================================//
+
+			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+
+				// extract current component mobile phase, mobile phase residual, mobile phase derivative (discontinous memory blocks)
+				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> C_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+				Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		cRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+
+				/*	convection dispersion RHS	*/
+
+				_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
+				ConvDisp_DG(C_comp, cRes_comp, t, comp);
+
+				/*	residual	*/
+
+				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
+
+				if (ypPtr) { // NULLpointer for consistent initialization
+					if (_disc.nBound[comp]) { // either one or null
+						Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(ypPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+						cRes_comp = cDot_comp + qDot_comp * ((1 - _disc.porosity) / _disc.porosity) - cRes_comp;
+					}
+					else
+						cRes_comp = cDot_comp - cRes_comp;
+				}
+			}
 
 			return 0;
 		}
@@ -848,7 +857,7 @@ namespace cadet
 			// Assemble Jacobian
 			assembleDiscretizedJacobian(alpha, idxr);
 
-			// todo delete debug code jacobian
+			//// todo delete debug code jacobian
 			//std::cout << std::fixed << std::setprecision(4) << "FD jac:" << std::endl;
 			//std::cout << FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
 			//std::cout << "analytical jac:" << std::endl;
