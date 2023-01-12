@@ -282,10 +282,6 @@ namespace cadet
 
 			//FDjac = MatrixXd::Zero(numDofs(), numDofs()); // todo delete!
 
-			// compute DG Jaconian blocks
-			updateSection(0);
-			_disc.initializeDGjac();
-
 			return bindingConfSuccess && reactionConfSuccess;
 		}
 
@@ -347,8 +343,17 @@ namespace cadet
 			Indexer idxr(_disc);
 
 			// ConvectionDispersionOperator tells us whether flow direction has changed
-			if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx) && (secIdx != 0))
+			if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx) && (secIdx != 0)) {
+				// (re)compute DG Jaconian blocks
+				updateSection(secIdx);
+				_disc.initializeDGjac();
 				return;
+			}
+			else {
+				// (re)compute DG Jaconian blocks
+				updateSection(secIdx);
+				_disc.initializeDGjac();
+			}
 
 			// Setup the matrix connecting inlet DOFs to first column cells
 			//_jacInlet.clear();
@@ -590,14 +595,10 @@ namespace cadet
 			const double* yPtr = reinterpret_cast<const double*>(y_);
 			const double* const ypPtr = reinterpret_cast<const double* const>(yDot_);
 			double* const resPtr = reinterpret_cast<double* const>(res_);
-			Eigen::Map<const Eigen::VectorXd> y(yPtr, numDofs());
-			Eigen::Map<const Eigen::VectorXd> yp(ypPtr, numDofs());
-			Eigen::Map<Eigen::VectorXd> res(resPtr, numDofs());
 
 			bool success = 1;
 
 			// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac
-			updateSection(secIdx);
 
 			if (wantJac) {
 
@@ -607,36 +608,10 @@ namespace cadet
 
 					_disc.newStaticJac = false;
 				}
-				else if (_disc.strideBound > 0) { // isotherm Jacobian is not always static
-					success += calcIsothermJacobian(t, secIdx, yPtr, threadLocalMem);
-				}
 
 				if (cadet_unlikely(!success))
 					LOG(Error) << "Jacobian pattern did not fit the Jacobian estimation";
 				
-			}
-
-			// ==================================//
-			// Estimate isotherm Residual		 //
-			// ==================================//
-			// isotherm RHS
-			if (_disc.strideBound > 0)
-				calcRHSq_DG(t, secIdx, yPtr, resPtr, threadLocalMem);
-
-			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-				if (_disc.nBound[comp]) { // either one or null
-
-					Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(ypPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-					Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		qRes_comp(resPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
-					if (!_disc.isKinetic[idxr.offsetBoundComp(comp)]) {
-						// -RHS_q already stored in res_q
-					}
-					else { // -RHS_q stored in res_q
-						if(ypPtr)
-							qRes_comp += qDot_comp;
-					}
-				}
 			}
 
 			// ==================================================//
@@ -657,17 +632,46 @@ namespace cadet
 
 				/*	residual	*/
 
-				res[comp] = y[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
-
-				if (ypPtr) { // NULLpointer for consistent initialization
-					if (_disc.nBound[comp]) { // either one or null
-						Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(ypPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-						cRes_comp = cDot_comp + qDot_comp * ((1 - _disc.porosity) / _disc.porosity) - cRes_comp;
-					}
-					else
-						cRes_comp = cDot_comp - cRes_comp;
-				}
+				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
 			}
+
+			// ==========================================//
+			// Estimate binding, reactions Residual		 //
+			// ==========================================//
+
+#ifdef CADET_PARALLELIZE
+				tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t blk)
+#else
+			for (unsigned int blk = 0; blk < _disc.nPoints; ++blk)
+#endif
+			{
+				//_jac.row(col * idxr.strideColCell())
+				linalg::BandedEigenSparseRowIterator jacIt(_jac, blk * idxr.strideColNode());
+				StateType const* const localY = y_ + idxr.offsetC() + idxr.strideColNode() * blk;
+				ResidualType* const localRes = res_ + idxr.offsetC() + idxr.strideColNode() * blk;
+				double const* const localYdot = yDot_ ? yDot_ + idxr.offsetC() + idxr.strideColNode() * blk : nullptr;
+
+				const parts::cell::CellParameters cellResParams
+				{
+					_disc.nComp,
+					_disc.nBound,
+					_disc.boundOffset,
+					_disc.strideBound,
+					_binding[0]->reactionQuasiStationarity(),
+					_totalPorosity,
+					nullptr,
+					_binding[0],
+					(_dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0)) ? _dynReaction[0] : nullptr
+				};
+
+				// position of current column node (z coordinate) - needed in externally dependent adsorption kinetic
+				double z = _disc.deltaZ * std::floor(blk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[blk % _disc.nNodes]);
+
+				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, true>(
+					t, secIdx, ColumnPosition{ z, 0.0, 0.0 }, localY, localYdot, localRes, jacIt, cellResParams, threadLocalMem.get()
+					);
+
+			} CADET_PARFOR_END;
 
 			return 0;
 		}
@@ -845,15 +849,19 @@ namespace cadet
 			assembleDiscretizedJacobian(alpha, idxr);
 
 			// todo delete debug code jacobian
-			////std::cout << std::fixed << std::setprecision(3) << "FD jac:" << std::endl;
-			////std::cout << FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
-			////std::cout << "analytical jac:" << std::endl;
-			////std::cout << _jacDisc.toDense() << std::endl;
+			//std::cout << std::fixed << std::setprecision(4) << "FD jac:" << std::endl;
+			//std::cout << FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
+			//std::cout << "analytical jac:" << std::endl;
+			//std::cout << _jacDisc.toDense() << std::endl;
 			//bool equal = (_jacDisc.toDense().isApprox(FDjac.block(1, 1, numPureDofs(), numPureDofs()), 1e-10));
 			//std::cout << "equal: " << equal << std::endl;
 			//std::cout << "max deviation: " << std::setprecision(10) << (_jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs())).maxCoeff() << std::endl;
-			////std::cout << "deviation pattern:\n" << std::setprecision(4) << _jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
-
+			//std::cout << "deviation pattern:\n" << std::setprecision(4) << _jacDisc.toDense() - FDjac.block(1, 1, numPureDofs(), numPureDofs()) << std::endl;
+			//std::cout << "inlet analytical: " << std::endl;
+			//std::cout << _jacInlet << std::endl;
+			//std::cout << "inlet FDjac: " << std::endl;
+			//std::cout << FDjac.block(1, 0, _disc.nNodes * idxr.strideColNode(), 1) << std::endl;
+			
 			// solve J x = rhs
 			Eigen::Map<VectorXd> r(rhs, numDofs()); 
 
