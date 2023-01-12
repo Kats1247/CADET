@@ -36,8 +36,6 @@
 #include <vector>
 
 #include "Benchmark.hpp"
-//#include <numbers>
-
 #include <Eigen/Dense> // use LA lib Eigen for Matrix operations
 #include <Eigen/Sparse>
 #ifndef _USE_MATH_DEFINES
@@ -490,9 +488,9 @@ protected:
 				convBlock(0, 0) += invWeights[0];
 				convBlock(0, 1) -= invWeights[0];
 			}
-			convBlock *= 2 * velocity / deltaZ;
+			convBlock *= 2 / deltaZ;
 
-			return convBlock;
+			return -convBlock; // *-1 for residual
 		}
 		/**
 		 * @brief calculates the DG Jacobian auxiliary block
@@ -655,7 +653,7 @@ protected:
 				dispBlock *= 2 / deltaZ;
 			}
 
-			return dispBlock;
+			return -dispBlock; // *-1 for residual
 		}
 	};
 
@@ -1136,7 +1134,6 @@ protected:
 		int offC = 0; // inlet DOFs not included in Jacobian
 
 		unsigned int nNodes = _disc.nNodes;
-		unsigned int polyDeg = _disc.polyDeg;
 		unsigned int nCells = _disc.nCol;
 		unsigned int nComp = _disc.nComp;
 
@@ -1454,15 +1451,11 @@ protected:
 	*/
 	int calcConvDispNodalJacobian() {
 
-		Indexer idx(_disc);
+		Indexer idxr(_disc);
 
-		int sNode = idx.strideColNode();
-		int sCell = idx.strideColCell();
-		int sComp = idx.strideColComp();
 		int offC = 0; // inlet DOFs not included in Jacobian
 
 		unsigned int nNodes = _disc.nNodes;
-		unsigned int polyDeg = _disc.polyDeg;
 		unsigned int nCells = _disc.nCol;
 		unsigned int nComp = _disc.nComp;
 
@@ -1474,19 +1467,19 @@ protected:
 
 		if (nCells >= 3u) {
 			MatrixXd dispBlock = _disc.DGjacAxDispBlocks[1];
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell and component
+
 			for (unsigned int cell = 1; cell < nCells - 1; cell++) {
-				for (unsigned int comp = 0; comp < nComp; comp++) {
-					for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+				for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+					for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
 						for (unsigned int j = 0; j < dispBlock.cols(); j++) {
 							// pattern is more sparse than a nNodes x 3*nNodes block.
 							if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
 								(i == 0 && j <= 2 * nNodes) ||
 								(i == nNodes - 1 && j >= nNodes - 1))
-								// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-								// col: jump over inlet DOFs and previous cells, go back one cell, add component offset and go node strides from there for each dispersion block entry
-								_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-											  offC + (cell - 1) * sCell + comp * sComp + j * sNode)
-								= -dispBlock(i, j) * _disc.dispersion[comp];
+								// row: iterator is at current node i and current component comp
+								// col: start at previous cell and jump to node j
+								jacIt[(j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
 				}
@@ -1499,30 +1492,30 @@ protected:
 		MatrixXd dispBlock = _disc.DGjacAxDispBlocks[0];
 
 		if (nCells != 1u) { // "standard" case
-			// copy *-1 to Jacobian
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell and component
+
+			for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
 					for (unsigned int j = nNodes; j < dispBlock.cols(); j++) {
 						// pattern is more sparse than a nNodes x 2*nNodes block.
 						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
 							(i == 0 && j <= 2 * nNodes) ||
 							(i == nNodes - 1 && j >= nNodes - 1))
-							_jac.coeffRef(offC + comp * sComp + i * sNode,
-										  offC + comp * sComp + (j - nNodes) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
+							// row: iterator is at current node i and current component comp
+							// col: jump to node j
+							jacIt[((j - nNodes) - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
 			}
 		}
 		else { // special case
-
-			// copy *-1 to Jacobian
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell and component
+			for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
 					for (unsigned int j = nNodes; j < nNodes * 2u; j++) {
-						_jac.coeffRef(offC + comp * sComp + i * sNode,
-									  offC + comp * sComp + (j - nNodes) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
+						// row: iterator is at current node i and current component comp
+						// col: jump to node j
+						jacIt[((j - nNodes) - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
 			}
@@ -1530,24 +1523,23 @@ protected:
 
 		/* right cell */
 		if (nCells != 1u) { // "standard" case
-
 			dispBlock = _disc.DGjacAxDispBlocks[std::min(nCells, 3u) - 1];
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + (nCells - 2) * idxr.strideColCell()); // row iterator starting at penultimate cell
 
-			// copy *-1 to Jacobian
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
+			for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
 					for (unsigned int j = 0; j < 2 * nNodes; j++) {
 						// pattern is more sparse than a nNodes x 2*nNodes block.
 						if ((j >= nNodes - 1 && j <= 2 * nNodes) ||
 							(i == 0 && j <= 2 * nNodes) ||
 							(i == nNodes - 1 && j >= nNodes - 1))
-							_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-										  offC + (nCells - 1 - 1) * sCell + comp * sComp + j * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
+							// row: iterator is at current node i and current component comp
+							// col: start at previous cell and jump to node j
+							jacIt[(j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
 			}
-		} // "standard" case
+		}
 
 		/*======================================================*/
 		/*			Compute Convection Jacobian Block			*/
@@ -1555,28 +1547,26 @@ protected:
 
 		// Convection block [ d RHS_conv / d c ], also depends on first entry of previous cell
 		MatrixXd convBlock = _disc.DGjacAxConvBlock;
+		linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell and component
 
 		// special inlet DOF treatment for first cell
-		_jacInlet(0, 0) = -convBlock(0, 0); // only first node depends on inlet concentration
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < convBlock.rows(); i++) {
-				//_jac.coeffRef(offC + comp * sComp + i * sNode, comp * sComp) = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
+		_jacInlet(0, 0) = _disc.velocity * convBlock(0, 0); // only first node depends on inlet concentration
+		for (unsigned int i = 0; i < convBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+			for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
+				//jacIt[0] = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
 				for (unsigned int j = 1; j < convBlock.cols(); j++) {
-					_jac.coeffRef(offC + comp * sComp + i * sNode,
-								  offC + comp * sComp + (j - 1) * sNode)
-								  += -convBlock(i, j);
+					jacIt[((j - 1) - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
 				}
 			}
 		}
+		// remaining cells
 		for (unsigned int cell = 1; cell < nCells; cell++) {
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < convBlock.rows(); i++) {
+			for (unsigned int i = 0; i < convBlock.rows(); i++, jacIt += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
 					for (unsigned int j = 0; j < convBlock.cols(); j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
-						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-									  offC + cell * sCell - sNode + comp * sComp + j * sNode)
-									  += -convBlock(i, j);
+						// row: iterator is at current cell and component
+						// col: start at previous cells last node and go to node j.
+						jacIt[-idxr.strideColNode() + (j - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
 					}
 				}
 			}
@@ -1585,15 +1575,57 @@ protected:
 		return 0;
 	}
 	/**
-	* @brief analytically calculates the convection dispersion jacobian for the exact integration (here: modal) DG scheme
-	*/
+	 * @brief inserts a liquid state block with different factors for components into the system jacobian
+	 * @param [in] block (sub)block to be added
+	 * @param [in] jac row iterator at first (i.e. upper) entry
+	 * @param [in] offCol column to row offset (i.e. start at upper left corner of block)
+	 * @param [in] idxr Indexer
+	 * @param [in] nCells determines how often the block is added (diagonally)
+	 * @param [in] Compfactor component dependend factors
+	 */
+	void insertCompDepLiquidJacBlock(Eigen::MatrixXd block, linalg::BandedEigenSparseRowIterator& jac, int offCol, Indexer& idxr, unsigned int nCells, double* Compfactor) {
+
+		for (unsigned int cell = 0; cell < nCells; cell++) {
+			for (unsigned int i = 0; i < block.rows(); i++, jac += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jac) {
+					for (unsigned int j = 0; j < block.cols(); j++) {
+						// row: at current node component
+						// col: jump to node j
+						jac[(j - i) * idxr.strideColNode() + offCol] = block(i, j) * Compfactor[comp];
+					}
+				}
+			}
+		}
+	}
+	/**
+	 * @brief adds liquid state blocks for all components to the system jacobian
+	 * @param [in] block to be added
+	 * @param [in] jac row iterator at first (i.e. upper left) entry
+	 * @param [in] column to row offset (i.e. start at upper left corner of block)
+	 * @param [in] idxr Indexer
+	 * @param [in] nCells determines how often the block is added (diagonally)
+	 */
+	void addLiquidJacBlock(Eigen::MatrixXd block, linalg::BandedEigenSparseRowIterator& jac, int offCol, Indexer& idxr, unsigned int nCells) {
+
+		for (unsigned int cell = 0; cell < nCells; cell++) {
+			for (unsigned int i = 0; i < block.rows(); i++, jac += idxr.strideColBound()) {
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jac) {
+					for (unsigned int j = 0; j < block.cols(); j++) {
+						// row: at current node component
+						// col: jump to node j
+						jac[(j - i) * idxr.strideColNode() + offCol] += block(i, j);
+					}
+				}
+			}
+		}
+	}
+	/**
+	 * @brief analytically calculates the convection dispersion jacobian for the exact integration (here: modal) DG scheme
+	 */
 	int calcConvDispModalJacobian() {
 
-		Indexer idx(_disc);
+		Indexer idxr(_disc);
 
-		int sNode = idx.strideColNode();
-		int sCell = idx.strideColCell();
-		int sComp = idx.strideColComp();
 		int offC = 0; // inlet DOFs not included in Jacobian
 
 		unsigned int nNodes = _disc.nNodes;
@@ -1604,181 +1636,67 @@ protected:
 		/*			Compute Dispersion Jacobian Block			*/
 		/*======================================================*/
 
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-
 		/* Inner cells (exist only if nCells >= 5) */
 		if (nCells >= 5) {
-
-			dispBlock = _disc.DGjacAxDispBlocks[2]; // inner cells
-
-			for (unsigned int cell = 2; cell < nCells - 2; cell++) {
-				for (unsigned int comp = 0; comp < nComp; comp++) {
-					for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-						for (unsigned int j = 0; j < dispBlock.cols(); j++) {
-							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-							// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry
-							_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-										  offC + cell * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
-								= -dispBlock(i, j) * _disc.dispersion[comp];
-						}
-					}
-				}
-			}
-
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + idxr.strideColCell() * 2); // row iterator starting at third cell, first component
+			// insert all (nCol - 4) inner cell blocks
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[2], jacIt, -(idxr.strideColCell() + idxr.strideColNode()), idxr, _disc.nCol - 4u, &(_disc.dispersion[0]));
 		}
 
 		/*	boundary cell neighbours (exist only if nCells >= 4)	*/
 		if (nCells >= 4) {
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + idxr.strideColCell()); // row iterator starting at second cell, first component
 
-			dispBlock = _disc.DGjacAxDispBlocks[1]; // left boundary cell neighbour
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[1].block(0, 1, nNodes, 3 * nNodes + 1), jacIt, -idxr.strideColCell(), idxr, 1u, &(_disc.dispersion[0]));
 
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 1; j < dispBlock.cols(); j++) {
-						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry. Also adjust for iterator j (-1)
-						_jac.coeffRef(offC + nNodes * sNode + comp * sComp + i * sNode,
-									  offC + comp * sComp + (j - 1) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
-
-			dispBlock = _disc.DGjacAxDispBlocks[nCells > 4 ? 3 : 2]; // right boundary cell neighbour
-
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 0; j < dispBlock.cols() - 1; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + (nCells - 2) * sCell + comp * sComp + i * sNode,
-									  offC + (nCells - 2) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
-
+			jacIt += (_disc.nCol - 4) * idxr.strideColCell(); // move iterator to preultimate cell (already at third cell)
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[nCells > 4 ? 3 : 2].block(0, 0, nNodes, 3 * nNodes + 1), jacIt, -(idxr.strideColCell() + idxr.strideColNode()), idxr, 1u, &(_disc.dispersion[0]));
 		}
 
 		/*			boundary cells (exist only if nCells >= 3)			*/
 		if (nCells >= 3) {
 
-			dispBlock = _disc.DGjacAxDispBlocks[0]; // left boundary cell
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell, first component
 
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = nNodes + 1; j < dispBlock.cols(); j++) {
-						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + comp * sComp + i * sNode,
-									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[0].block(0, nNodes + 1, nNodes, 2 * nNodes + 1), jacIt, 0, idxr, 1u, &(_disc.dispersion[0]));
 
-			dispBlock = _disc.DGjacAxDispBlocks[std::min(nCells, 5u) - 1u]; // right boundary cell
-
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 0; j < 2 * nNodes + 1; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cells, go back one cell and one node, add component offset and go node strides from there for relevant dispersion block entries.
-						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-									  offC + (nCells - 1) * sCell - (nNodes + 1) * sNode + comp * sComp + j * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
+			jacIt += (_disc.nCol - 2) * idxr.strideColCell(); // move iterator to last cell (already at second cell)
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[std::min(nCells, 5u) - 1u].block(0, 0, nNodes, 2 * nNodes + 1), jacIt, -(idxr.strideColCell()+idxr.strideColNode()), idxr, 1u, &(_disc.dispersion[0]));
 		}
 
 		/* For special cases nCells = 1, 2, 3, some cells still have to be treated separately*/
 
 		if (nCells == 1) {
-			dispBlock = _disc.DGjacAxDispBlocks[0];
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = nNodes + 1; j < 2 * nNodes + 1; j++) {
-						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + comp * sComp + i * sNode,
-									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell, first component
+			// insert the only block
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[0].block(0, nNodes + 1, nNodes, nNodes), jacIt, 0, idxr, 1u, &(_disc.dispersion[0]));
 		}
 		else if (nCells == 2) {
-			dispBlock = _disc.DGjacAxDispBlocks[0];// get left boundary cell
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = nNodes + 1; j < 3 * nNodes + 1; j++) {
-						// row: jump over inlet DOFs, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs, add component offset, adjust for iterator j (-Nnodes-1) and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + comp * sComp + i * sNode,
-									  offC + comp * sComp + (j - (nNodes + 1)) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
-			dispBlock = _disc.DGjacAxDispBlocks[1];// get right boundary cell
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 1; j < 2 * nNodes + 1; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cells, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
-									  offC + (nCells - 1) * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell, first component
+			// left Bacobian block
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[0].block(0, nNodes + 1, nNodes, 2 * nNodes), jacIt, 0, idxr, 1u, &(_disc.dispersion[0]));
+			// right Bacobian block, iterator is already moved to second cell
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[1].block(0, 1, nNodes, 2 * nNodes), jacIt, -idxr.strideColCell(), idxr, 1u, &(_disc.dispersion[0]));
 		}
 		else if (nCells == 3) {
-			dispBlock = _disc.DGjacAxDispBlocks[1];
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < dispBlock.rows(); i++) {
-					for (unsigned int j = 1; j < dispBlock.cols() - 1; j++) {
-						// row: jump over inlet DOFs and previous cell, add component offset and go node strides from there for each dispersion block entry
-						// col: jump over inlet DOFs and previous cell, go back one cell, add component offset, adjust for iterator (j-1) and go node strides from there for each dispersion block entry.
-						_jac.coeffRef(offC + 1 * sCell + comp * sComp + i * sNode,
-									  offC + 1 * sCell - (nNodes) * sNode + comp * sComp + (j-1) * sNode)
-							= -dispBlock(i, j) * _disc.dispersion[comp];
-					}
-				}
-			}
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + idxr.strideColCell()); // row iterator starting at first cell, first component
+			insertCompDepLiquidJacBlock(_disc.DGjacAxDispBlocks[1].block(0, 1, nNodes, 3 * nNodes), jacIt, -idxr.strideColCell(), idxr, 1u, &(_disc.dispersion[0]));
 		}
 
 		/*======================================================*/
 		/*			Compute Convection Jacobian Block			*/
 		/*======================================================*/
 
+		int sComp = idxr.strideColComp();
+		int sNode = idxr.strideColNode();
+		int sCell = idxr.strideColCell();
+
+		linalg::BandedEigenSparseRowIterator jac(_jac, offC);
 		// special inlet DOF treatment for first cell
-		_jacInlet = -_disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < _disc.DGjacAxConvBlock.rows(); i++) {
-				//_jac.coeffRef(offC + comp * sComp + i * sNode, comp * sComp) = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
-				for (unsigned int j = 1; j < _disc.DGjacAxConvBlock.cols(); j++) {
-					_jac.coeffRef(offC + comp * sComp + i * sNode,
-								  offC + comp * sComp + (j - 1) * sNode)
-								  -= _disc.DGjacAxConvBlock(i, j);
-				}
-			}
-		}
-		for (unsigned int cell = 1; cell < nCells; cell++) {
-			for (unsigned int comp = 0; comp < nComp; comp++) {
-				for (unsigned int i = 0; i < _disc.DGjacAxConvBlock.rows(); i++) {
-					for (unsigned int j = 0; j < _disc.DGjacAxConvBlock.cols(); j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
-						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						_jac.coeffRef(offC + cell * sCell + comp * sComp + i * sNode,
-									  offC + cell * sCell - sNode + comp * sComp + j * sNode)
-									  -= _disc.DGjacAxConvBlock(i, j);
-					}
-				}
-			}
-		}
+		_jacInlet = _disc.velocity * _disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
+		addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock.block(0, 1, nNodes, nNodes), jac, 0, idxr, 1);
+		if (_disc.nCol > 1) // iterator already moved to second cell
+			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, -idxr.strideColNode(), idxr, _disc.nCol - 1);
 
 		return 0;
 	}
