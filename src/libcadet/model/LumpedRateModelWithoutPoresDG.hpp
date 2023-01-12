@@ -231,7 +231,6 @@ protected:
 		Eigen::VectorXd dispersion; //!< Column dispersion (may be section and component dependent)
 		bool _dispersionCompIndep; //!< Determines whether dispersion is component independent
 		double velocity; //!< Interstitial velocity (may be section dependent) \f$ u \f$
-		double curVelocity;
 		int curSection; //!< current section index
 
 		double length_;
@@ -972,7 +971,7 @@ protected:
 	* @brief calculates the substitute h = vc - sqrt(D_ax) g(c)
 	*/
 	void calcH(Eigen::Map<const VectorXd, 0, InnerStride<>>& C, unsigned int Comp) {
-		_disc.h = _disc.velocity * C - std::sqrt(_disc.dispersion[Comp]) * _disc.g;
+		_disc.h = -_disc.velocity * C + std::sqrt(_disc.dispersion[Comp]) * _disc.g;
 	}
 
 	/**
@@ -1043,7 +1042,7 @@ protected:
 		// solve main equation w_t = d h / d x   //
 		// ======================================//
 
-		calcH(C, Comp); // calculate the substitute h(S(c), c) = sqrt(D_ax) g(c) - v c
+		calcH(C, Comp); // calculate the (residual, i.e. *-1) substitute h(S(c), c) = - (sqrt(D_ax) g(c) - v c)
 
 		volumeIntegral(h, resC); // DG volumne integral in strong form
 
@@ -1090,7 +1089,7 @@ protected:
 		else
 			ConvDispNodalPattern(tripletList);
 
-		isothermPattern(tripletList);
+		bindingAndReactionPattern(tripletList);
 
 		if (stateDer)
 			stateDerPattern(tripletList); // only adds [ d convDisp / d q_t ] because main diagonal is already included !
@@ -1395,7 +1394,7 @@ protected:
 	* @brief sets the sparsity pattern of the isotherm Jacobian
 	* @detail Independent of the isotherm, all liquid and solid entries (so all entries, the isotherm could theoretically depend on) at a discrete point are set.
 	*/
-	void isothermPattern(std::vector<T>& tripletList) {
+	void bindingAndReactionPattern(std::vector<T>& tripletList) {
 		
 		Indexer idxr(_disc);
 		int offC = 0; // inlet DOFs not included in Jacobian
@@ -1412,7 +1411,6 @@ protected:
 				}
 			}
 		}
-
 	}
 
 	/**
@@ -1446,6 +1444,7 @@ protected:
 			return disc.nComp * (disc.nCol * disc.nNodes * disc.nNodes + 8u * disc.nNodes);
 		}
 	}
+
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
 	*/
@@ -1467,7 +1466,7 @@ protected:
 
 		if (nCells >= 3u) {
 			MatrixXd dispBlock = _disc.DGjacAxDispBlocks[1];
-			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC); // row iterator starting at first cell and component
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + idxr.strideColCell()); // row iterator starting at second cell and component
 
 			for (unsigned int cell = 1; cell < nCells - 1; cell++) {
 				for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
@@ -1479,7 +1478,7 @@ protected:
 								(i == nNodes - 1 && j >= nNodes - 1))
 								// row: iterator is at current node i and current component comp
 								// col: start at previous cell and jump to node j
-								jacIt[(j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
+								jacIt[-idxr.strideColCell() + (j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 						}
 					}
 				}
@@ -1524,7 +1523,7 @@ protected:
 		/* right cell */
 		if (nCells != 1u) { // "standard" case
 			dispBlock = _disc.DGjacAxDispBlocks[std::min(nCells, 3u) - 1];
-			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + (nCells - 2) * idxr.strideColCell()); // row iterator starting at penultimate cell
+			linalg::BandedEigenSparseRowIterator jacIt(_jac, offC + (nCells - 1) * idxr.strideColCell()); // row iterator starting at last cell
 
 			for (unsigned int i = 0; i < dispBlock.rows(); i++, jacIt += idxr.strideColBound()) {
 				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
@@ -1535,7 +1534,7 @@ protected:
 							(i == nNodes - 1 && j >= nNodes - 1))
 							// row: iterator is at current node i and current component comp
 							// col: start at previous cell and jump to node j
-							jacIt[(j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
+							jacIt[-idxr.strideColCell() + (j - i) * idxr.strideColNode()] = dispBlock(i, j) * _disc.dispersion[comp];
 					}
 				}
 			}
@@ -1699,41 +1698,6 @@ protected:
 			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, -idxr.strideColNode(), idxr, _disc.nCol - 1);
 
 		return 0;
-	}
-
-	/**
-	* @brief analytically calculates the isotherm jacobian
-	* @return 1 if jacobain estimation fits the predefined pattern of the jacobian, 0 if not.
-	*/
-	int calcIsothermJacobian(double t, unsigned int secIdx, const double* const y, util::ThreadLocalStorage& threadLocalMem) {
-
-		Indexer idxr(_disc);
-		unsigned int offC = 0; // inlet DOFs not included in Jacobian
-
-		// set rowIterator and local state pointer to first solid concentration
-		linalg::BandedEigenSparseRowIterator rowIterator(_jac, offC + idxr.strideColLiquid());
-		const double* yLocal = y + idxr.offsetC() + idxr.strideColLiquid();
-
-		// Offset from the first component of the mobile phase to the first bound state
-		unsigned int offSetCp = _disc.nComp;
-
-		for (unsigned int point = 0; point < _disc.nPoints; point++) {
-
-			double z = _disc.deltaZ * std::floor(point / _disc.nNodes)
-				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[point % _disc.nNodes]);
-
-			_binding[0]->analyticJacobian(t, secIdx, ColumnPosition{ z, 0.0, 0.0 }, yLocal, offSetCp, rowIterator, threadLocalMem.get());
-
-			// set rowIterator and y to first bound concentration of next discrete point
-			rowIterator += idxr.strideColNode();
-			yLocal += idxr.strideColNode();
-
-		}
-
-		if (!_jac.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
-			return 0;
-
-		return 1;
 	}
 
 	/**
