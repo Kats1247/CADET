@@ -630,13 +630,22 @@ void LumpedRateModelWithPoresDG::notifyDiscontinuousSectionTransition(double t, 
 	Indexer idxr(_disc);
 
 	// ConvectionDispersionOperator tells us whether flow direction has changed
-	if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx))
+	if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx)) {
+		// (re)compute DG Jaconian blocks
+		updateSection(secIdx);
+		_disc.initializeDGjac();
 		return;
+	}
+	else {
+		// (re)compute DG Jaconian blocks
+		updateSection(secIdx);
+		_disc.initializeDGjac();
+	}
 
 	//// Setup the matrix connecting inlet DOFs to first column cells
 	//_jacInlet.clear();
-	//const double h = static_cast<double>(_convDispOp.columnLength()) / static_cast<double>(_disc.nCol);
-	//const double u = static_cast<double>(_convDispOp.currentVelocity());
+	const double h = static_cast<double>(_convDispOp.columnLength()) / static_cast<double>(_disc.nCol);
+	const double u = static_cast<double>(_convDispOp.currentVelocity());
 
 	//if (u >= 0.0)
 	//{
