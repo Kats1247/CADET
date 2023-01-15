@@ -896,8 +896,17 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 	Indexer idxr(_disc);
 
 	// ConvectionDispersionOperator tells us whether flow direction has changed
-	if (!_convDispOpB.notifyDiscontinuousSectionTransition(t, secIdx))
+	if (!_convDispOpB.notifyDiscontinuousSectionTransition(t, secIdx)) {
+		// (re)compute DG Jaconian blocks
+		updateSection(secIdx);
+		_disc.initializeDGAxjac();
 		return;
+	}
+	else {
+		// (re)compute DG Jaconian blocks
+		updateSection(secIdx);
+		_disc.initializeDGAxjac();
+	}
 
 	// @TODO: backwards flow
 	//// Setup the matrix connecting inlet DOFs to first column cells
