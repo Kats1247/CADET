@@ -650,6 +650,7 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 	_filmDiffusionMode = readAndRegisterMultiplexCompTypeSecParam(paramProvider, _parameters, _filmDiffusion, "FILM_DIFFUSION", _disc.nParType, _disc.nComp, _unitOpIdx);
 	_parDiffusionMode = readAndRegisterMultiplexCompTypeSecParam(paramProvider, _parameters, _parDiffusion, "PAR_DIFFUSION", _disc.nParType, _disc.nComp, _unitOpIdx);
 
+	_disc.offsetSurfDiff = new unsigned int[_disc.strideBound[_disc.nParType]];
 	if (paramProvider.exists("PAR_SURFDIFFUSION"))
 		_parSurfDiffusionMode = readAndRegisterMultiplexBndCompTypeSecParam(paramProvider, _parameters, _parSurfDiffusion, "PAR_SURFDIFFUSION", _disc.nParType, _disc.nComp, _disc.strideBound, _disc.nBound, _unitOpIdx);
 	else
@@ -888,6 +889,9 @@ void GeneralRateModelDG::useAnalyticJacobian(const bool analyticJac)
 
 void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned int secIdx, const ConstSimulationState& simState, const AdJacobianParams& adJac)
 {
+	// calculate offsets between surface diffusion storage and state vector order
+	orderSurfDiff();
+
 	// Setup flux Jacobian blocks at the beginning of the simulation or in case of
 	// section dependent film or particle diffusion coefficients
 	if ((secIdx == 0) || isSectionDependent(_filmDiffusionMode) || isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
@@ -899,13 +903,13 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 	if (!_convDispOpB.notifyDiscontinuousSectionTransition(t, secIdx)) {
 		// (re)compute DG Jaconian blocks
 		updateSection(secIdx);
-		_disc.initializeDGAxjac();
+		_disc.initializeDGjac(_parGeomSurfToVol);
 		return;
 	}
 	else {
 		// (re)compute DG Jaconian blocks
 		updateSection(secIdx);
-		_disc.initializeDGAxjac();
+		_disc.initializeDGjac(_parGeomSurfToVol);
 	}
 
 	// @TODO: backwards flow
