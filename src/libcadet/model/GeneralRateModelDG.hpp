@@ -243,7 +243,6 @@ protected:
 	template <typename StateType, typename ResidualType, typename ParamType>
 	int residualFlux(double t, unsigned int secIdx, StateType const* y, double const* yDot, ResidualType* res);
 
-	void assembleOffdiagJac(double t, unsigned int secIdx, double const* vecStateY);
 	void extractJacobianFromAD(active const* const adRes, unsigned int adDirOffset);
 
 	void assembleDiscretizedGlobalJacobian(double alpha, Indexer idxr);
@@ -446,7 +445,7 @@ protected:
 
 			for (unsigned int type = 0; type < nParType; type++) {
 				for (unsigned int block = 0; block < nParCell[type]; block++) {
-					DGjacParDispBlocks[std::accumulate(nParCell, nParCell + type, 0) + block] = DGjacobianParDispBlock(block + 1u, type, parGeomSurfToVol[type]);
+					DGjacParDispBlocks[offsetMetric[type] + block] = DGjacobianParDispBlock(block + 1u, type, parGeomSurfToVol[type]);
 				}
 			}
 		}
@@ -652,24 +651,24 @@ protected:
 			MatrixXd gBlock = MatrixXd::Zero(nNodes, nNodes + 2);
 			gBlock.block(0, 1, nNodes, nNodes) = polyDerM;
 			if (exactInt) {
-				if (cellIdx != 1 && cellIdx != nCol) {
+				if (cellIdx != 1 && cellIdx != nCol) { // inner cells
 					gBlock.block(0, 0, nNodes, 1) -= 0.5 * invMM.block(0, 0, nNodes, 1);
 					gBlock.block(0, 1, nNodes, 1) += 0.5 * invMM.block(0, 0, nNodes, 1);
 					gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
 					gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
 				}
-				else if (cellIdx == 1) { // left
+				else if (cellIdx == 1) { // left boundary cell
 					if (cellIdx == nCol)
 						return gBlock * 2 / deltaZ;
 					;
 					gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
 					gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * invMM.block(0, nNodes - 1, nNodes, 1);
 				}
-				else if (cellIdx == nCol) { // right
+				else if (cellIdx == nCol) { // right boundary cell
 					gBlock.block(0, 0, nNodes, 1) -= 0.5 * invMM.block(0, 0, nNodes, 1);
 					gBlock.block(0, 1, nNodes, 1) += 0.5 * invMM.block(0, 0, nNodes, 1);
 				}
-				else if (cellIdx == 0 || cellIdx == nCol + 1) {
+				else if (cellIdx == 0 || cellIdx == nCol + 1) { // cellIdx out of bounds
 					gBlock.setZero();
 				}
 				gBlock *= 2 / deltaZ;
@@ -810,28 +809,27 @@ protected:
 			// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
 			MatrixXd gBlock = MatrixXd::Zero(nParNode[parType], nParNode[parType] + 2);
 			gBlock.block(0, 1, nParNode[parType], nParNode[parType]) = parPolyDerM[parType];
-			if (exactInt) {
-				if (cellIdx == 0 || cellIdx == nParCell[parType] + 1) {
+			if (parExactInt[parType]) {
+				if (cellIdx == 0 || cellIdx == nParCell[parType] + 1) { // cellIdx out of bounds
 					return MatrixXd::Zero(nParNode[parType], nParNode[parType] + 2);
 				}
-				if (cellIdx != 1 && cellIdx != nParCell[parType]) {
+				if (cellIdx != 1 && cellIdx != nParCell[parType]) { // inner cell
 					gBlock.block(0, 0, nParNode[parType], 1) -= 0.5 * parInvMM_Leg[parType].block(0, 0, nParNode[parType], 1);
 					gBlock.block(0, 1, nParNode[parType], 1) += 0.5 * parInvMM_Leg[parType].block(0, 0, nParNode[parType], 1);
 					gBlock.block(0, nParNode[parType], nParNode[parType], 1) -= 0.5 * parInvMM_Leg[parType].block(0, nParNode[parType] - 1, nParNode[parType], 1);
 					gBlock.block(0, nParNode[parType] + 1, nParNode[parType], 1) += 0.5 * parInvMM_Leg[parType].block(0, nParNode[parType] - 1, nParNode[parType], 1);
 				}
-				else if (cellIdx == 1) { // left
-					if (cellIdx == nParCell[parType])
-						return gBlock * 2 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
-					;
+				else if (cellIdx == 1u) { // left boundary cell
+					if (cellIdx == nParCell[parType]) // special case one cell
+						return gBlock * 2.0 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
 					gBlock.block(0, nParNode[parType], nParNode[parType], 1) -= 0.5 * parInvMM_Leg[parType].block(0, nParNode[parType] - 1, nParNode[parType], 1);
 					gBlock.block(0, nParNode[parType] + 1, nParNode[parType], 1) += 0.5 * parInvMM_Leg[parType].block(0, nParNode[parType] - 1, nParNode[parType], 1);
 				}
-				else if (cellIdx == nParCell[parType]) { // right
+				else if (cellIdx == nParCell[parType]) { // right boundary cell
 					gBlock.block(0, 0, nParNode[parType], 1) -= 0.5 * parInvMM_Leg[parType].block(0, 0, nParNode[parType], 1);
 					gBlock.block(0, 1, nParNode[parType], 1) += 0.5 * parInvMM_Leg[parType].block(0, 0, nParNode[parType], 1);
 				}
-				gBlock *= 2 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
+				gBlock *= 2.0 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
 			}
 			else {
 
@@ -866,6 +864,7 @@ protected:
 
 			return gStarDC;
 		}
+
 		Eigen::MatrixXd getParBMatrix(int parType, int cell, double parGeomSurfToVol) {
 			// also known as "lifting" matrix and includes metric dependent terms for particle discretization
 			MatrixXd B = MatrixXd::Zero(nParNode[parType], nParNode[parType]);
@@ -890,7 +889,6 @@ protected:
 			MatrixXd dispBlock;
 
 			if (parExactInt[parType]) {
-
 				// Inner dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
 				dispBlock = MatrixXd::Zero(nParNode[parType], 3 * nParNode[parType] + 2);
 				MatrixXd B = getParBMatrix(parType, cellIdx, parGeomSurfToVol); // "Lifting" matrix
@@ -905,8 +903,7 @@ protected:
 					dispBlock.block(0, nParNode[parType], nParNode[parType], nParNode[parType] + 2) = (parPolyDerM[parType] - parInvMM[parType] * B) * gBlock;
 					dispBlock += parInvMM[parType] * B * gStarDC;
 				}
-				dispBlock *= 2 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
-
+				dispBlock *= 2.0 / deltaR[offsetMetric[parType] + (cellIdx - 1)];
 			}
 			else {
 				// inexact integration collocation DGSEM deprecated here
@@ -1748,7 +1745,7 @@ protected:
 			}
 		}
 
-		return 0;
+		return 1;
 	}
 
 	/**
@@ -1907,7 +1904,7 @@ protected:
 			}
 		}
 
-		return 0;
+		return 1;
 	}
 
 
@@ -2516,11 +2513,10 @@ protected:
 			}
 		}
 	}
-
 	/**
-	 * @brief analytically calculates the particle dispersion jacobian of the exact integration DG scheme for a single particle type and bead
+	 * @brief analytically calculates the particle dispersion jacobian of the DGSEM (exact integration) for a single particle type and bead
 	 */
-	int calcParticleJacobianExInt(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
+	int calcParticleDGSEMJacobian(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
 
 		Indexer idxr(_disc);
 
@@ -2531,40 +2527,53 @@ protected:
 		unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 		unsigned int nNodes = _disc.nParNode[parType];
 
-		// blocks to compute jacobian
-		Eigen::MatrixXd dispBlock;
-		Eigen::MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
-		B(0, 0) = -1.0; B(nNodes - 1, nNodes - 1) = 1.0;
-
+		/* Special case */
 		if (_disc.nParCell[parType] == 1) {
 
 			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{parType}, ParticleIndex{colNode})); // row iterator starting at first cell, first component
-			insertParJacBlock(_disc.DGjacParDispBlocks[0].block(0, nNodes + 1, nNodes, nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
+			
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 0].block(0, nNodes + 1, nNodes, nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
+			return 1;
 		}
+
+		/* Special case */
 		if (_disc.nParCell[parType] == 2) {
 
 			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode })); // row iterator starting at first cell, first component
-			// left Bacobian block
-			insertParJacBlock(_disc.DGjacParDispBlocks[0].block(0, nNodes + 1, nNodes, 2 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
+			
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 0].block(0, nNodes + 1, nNodes, 2 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
 			// right Bacobian block, iterator is already moved to second cell
-			insertParJacBlock(_disc.DGjacParDispBlocks[1].block(0, 1, nNodes, 2 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 1].block(0, 1, nNodes, 2 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
+			return 1;
 		}
+
+		/* Special case */
+		if (_disc.nParCell[parType] == 3) {
+
+			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + idxr.strideParShell(parType)); // row iterator starting at first cell, first component
+			
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 1].block(0, 1, nNodes, 3 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
+		}
+
 		/* Inner cells (exist only if nCells >= 5) */
 		if (_disc.nParCell[parType] >= 5) {
+
 			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + idxr.strideParShell(parType) * 2); // row iterator starting at third cell, first component
-			// insert all (nCol - 4) inner cell blocks
+			
+																																											  // insert all (nCol - 4) inner cell blocks
 			for (unsigned int cell = 2; cell < _disc.nParCell[parType] - 2; cell++)
-				insertParJacBlock(_disc.DGjacParDispBlocks[cell], jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
+				insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + cell], jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
 		}
 
 		/*	boundary cell neighbours (exist only if nCells >= 4)	*/
 		if (_disc.nParCell[parType] >= 4) {
+
 			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + idxr.strideParShell(parType)); // row iterator starting at second cell, first component
 
-			insertParJacBlock(_disc.DGjacParDispBlocks[1].block(0, 1, nNodes, 3 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 1].block(0, 1, nNodes, 3 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
 
 			jacIt += (_disc.nParCell[parType] - 4) * idxr.strideParShell(parType); // move iterator to preultimate cell (already at third cell)
-			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.nParCell[parType] - 2u].block(0, 0, nNodes, 3 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + _disc.nParCell[parType] - 2u].block(0, 0, nNodes, 3 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
 		}
 
 		/*			boundary cells (exist only if nCells >= 3)			*/
@@ -2572,23 +2581,19 @@ protected:
 
 			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode })); // row iterator starting at first cell, first component
 
-			insertParJacBlock(_disc.DGjacParDispBlocks[0].block(0, nNodes + 1, nNodes, 2 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + 0].block(0, nNodes + 1, nNodes, 2 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, 0);
 
 			jacIt += (_disc.nParCell[parType] - 2) * idxr.strideParShell(parType); // move iterator to last cell (already at second cell)
-			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.nParCell[parType] - 1u].block(0, 0, nNodes, 2 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
-		}
-		if (_disc.nParCell[parType] == 3) {
-			linalg::BandedEigenSparseRowIterator jacIt(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode }) + idxr.strideParShell(parType)); // row iterator starting at first cell, first component
-			insertParJacBlock(_disc.DGjacParDispBlocks[1].block(0, 1, nNodes, 3 * nNodes), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -idxr.strideParShell(parType));
+			insertParJacBlock(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + _disc.nParCell[parType] - 1u].block(0, 0, nNodes, 2 * nNodes + 1), jacIt, idxr, parDiff, parSurfDiff, invBetaP, _binding[parType]->reactionQuasiStationarity(), parType, 1u, -(idxr.strideParShell(parType) + idxr.strideParNode(parType)));
 		}
 
-		return 0;
+		return 1;
 	}
 	/**
-	 * @brief analytically calculates the particle dispersion jacobian of the inexact integration DG scheme for one particle type and bead
+	 * @brief analytically calculates the particle dispersion jacobian of the collocation DGSEM (inexact integration) for one particle type and bead
 	 * @note deprecated, not further development
 	 */
-	int calcParticleJacobianInexInt(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
+	int calcParticleCollocationDGSEMJacobian(unsigned int parType, unsigned int colNode, const active* const parDiff, const active* const parSurfDiff, const double* const invBetaP) {
 
 		Indexer idxr(_disc);
 
@@ -2910,9 +2915,8 @@ protected:
 
 		} // if nCells > 1
 
-		return 0;
+		return 1;
 	}
-
 	/**
 	 * @brief adds jacobian entries which have been overwritten by the binding kernel (only use for surface diffusion combined with kinetic binding)
 	 * @detail only adds the entries d RHS_i / d c^s_i, which lie on the diagonal
@@ -2920,6 +2924,30 @@ protected:
 	 * @parSurfDiff[in] pointer to particle surface diffusion at current section and particle type
 	 */
 	int addSolidDGentries(unsigned int parType, const active* const parSurfDiff) {
+
+		if (!_disc.parExactInt[parType])
+			return addSolidDGentries_inexInt(parType, parSurfDiff);
+
+		Indexer idxr(_disc);
+
+		for (unsigned int col = 0; col < _disc.nPoints; col++) {
+			// Get jacobian iterator at first solid entry of first particle of current type
+			linalg::BandedEigenSparseRowIterator jac(_globalJac, idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ col }) + idxr.strideParLiquid());
+
+			for (unsigned int cell = 0; cell < _disc.nParCell[parType]; cell++)
+				addDiagonalSolidJacobianEntries(_disc.DGjacParDispBlocks[_disc.offsetMetric[parType] + cell].block(0, _disc.nParNode[parType] + 1, _disc.nParNode[parType], _disc.nParNode[parType]),
+					jac, idxr, parSurfDiff, _binding[parType]->reactionQuasiStationarity(), parType);
+		}
+
+		return 1;
+	}
+	/**
+	 * @brief adds jacobian entries which have been overwritten by the binding kernel (only use for surface diffusion combined with kinetic binding)
+	 * @detail only adds the entries d RHS_i / d c^s_i, which lie on the diagonal
+	 * @parType[in] current particle type
+	 * @parSurfDiff[in] pointer to particle surface diffusion at current section and particle type
+	 */
+	int addSolidDGentries_inexInt(unsigned int parType, const active* const parSurfDiff) {
 
 		Indexer idxr(_disc);
 
@@ -2939,41 +2967,27 @@ protected:
 
 			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType]]);
 
-			if (_disc.parExactInt[parType]) {
-				// B (lifting) matrix depends on metrics
-				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
-					dispBlock = invMap * invMap * (_disc.parPolyDerM[parType] - _disc.parInvMM[parType] * B) * _disc.parPolyDerM[parType];
-				}
-				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioCylinder) {
-					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
-				}
-				else if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSphere) {
-					dispBlock = invMap * invMap * _disc.minus_InvMM_ST[parType] * _disc.parPolyDerM[parType];
-				}
-			}
-			else {
-				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
-					dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
+			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0)
+				dispBlock = invMap * invMap * (_disc.Dr[parType] - _disc.parInvWeights[parType].asDiagonal() * B) * _disc.parPolyDerM[parType];
 
-				else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
+			else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
 
-					dispBlock = MatrixXd::Zero(nNodes, nNodes);
+				dispBlock = MatrixXd::Zero(nNodes, nNodes);
 
-					// reduced system
-					dispBlock.block(1, 0, nNodes - 1, nNodes)
-						= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
-							- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
-						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+				// reduced system
+				dispBlock.block(1, 0, nNodes - 1, nNodes)
+					= (_disc.Dr[parType].block(1, 1, nNodes - 1, nNodes - 1)
+						- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1))
+					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-					// inner boundary node
-					dispBlock.block(0, 0, 1, nNodes)
-						= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
-							_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
-								_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
-						* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
+				// inner boundary node
+				dispBlock.block(0, 0, 1, nNodes)
+					= -(_disc.Ir[parType].segment(1, nNodes - 1).cwiseProduct(
+						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
+							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
+					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
 
-					dispBlock *= invMap * invMap;
-				}
+				dispBlock *= invMap * invMap;
 			}
 
 			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
@@ -2983,7 +2997,7 @@ protected:
 				linalg::BandedEigenSparseRowIterator jac(_globalJac, offset + idxr.strideParLiquid());
 
 				for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac += idxr.strideParLiquid()) {
-					
+
 					// @TODO test if we use correct diffusion parameter entry for more complicated cases, i.e. multiple comp, bnd states
 					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac) {
@@ -3017,45 +3031,39 @@ protected:
 			int _cell = 0;
 			double invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + _cell]);
 
-			if (_disc.parExactInt[parType]) {
-				_disc.nParCell[parType] == 2 ? bnd_dispBlock = parSpecialBlockTwoCells(parType, false).block(0, nNodes + 1, nNodes, 2 * nNodes)
-											 : bnd_dispBlock = parLeftBndryCellBlock(parType).block(0, nNodes + 1, nNodes, 2 * nNodes);
+			// numerical flux contribution for right interface of left boundary cell -> d f^*_N / d cp
+			MatrixXd bnd_gStarDC = MatrixXd::Zero(nNodes, 2 * nNodes);
+			bnd_gStarDC.block(nNodes - 1, 0, 1, nNodes + 1) = GBlock_l.block(nNodes - 1, 0, 1, nNodes + 1);
+			bnd_gStarDC.block(nNodes - 1, nNodes - 1, 1, nNodes + 1) += GBlock_r.block(0, 0, 1, nNodes + 1);
+			bnd_gStarDC *= 0.5;
+
+			// "standard" computation for slab-shaped particles and spherical, cylindrical particles without core
+			if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0) {
+				// dispBlock <- invMap^2 * ( D * G_l - M^-1 * B * [G_l - g^*] )
+				bnd_dispBlock.block(0, 0, nNodes, nNodes + 1) = (_disc.Dr[_disc.offsetMetric[parType]] - _disc.parInvWeights[parType].asDiagonal() * B) * GBlock_l;
+				bnd_dispBlock.block(0, 0, nNodes, 2 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * bnd_gStarDC;
+				bnd_dispBlock *= invMap * invMap;
 			}
-			else {
-				// numerical flux contribution for right interface of left boundary cell -> d f^*_N / d cp
-				MatrixXd bnd_gStarDC = MatrixXd::Zero(nNodes, 2 * nNodes);
-				bnd_gStarDC.block(nNodes - 1, 0, 1, nNodes + 1) = GBlock_l.block(nNodes - 1, 0, 1, nNodes + 1);
-				bnd_gStarDC.block(nNodes - 1, nNodes - 1, 1, nNodes + 1) += GBlock_r.block(0, 0, 1, nNodes + 1);
-				bnd_gStarDC *= 0.5;
+			else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
 
-				// "standard" computation for slab-shaped particles and spherical, cylindrical particles without core
-				if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab || _parCoreRadius[parType] != 0.0) {
-					// dispBlock <- invMap^2 * ( D * G_l - M^-1 * B * [G_l - g^*] )
-					bnd_dispBlock.block(0, 0, nNodes, nNodes + 1) = (_disc.Dr[_disc.offsetMetric[parType]] - _disc.parInvWeights[parType].asDiagonal() * B) * GBlock_l;
-					bnd_dispBlock.block(0, 0, nNodes, 2 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * bnd_gStarDC;
-					bnd_dispBlock *= invMap * invMap;
-				}
-				else { // special treatment of inner boundary node for spherical and cylindrical particles without particle core
+				// inner boundary node
+				bnd_dispBlock.block(0, 0, 1, nNodes + 1)
+					= -(_disc.Ir[_disc.offsetMetric[parType]].segment(1, nNodes - 1).cwiseProduct(
+						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
+							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
+					* GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
 
-					// inner boundary node
-					bnd_dispBlock.block(0, 0, 1, nNodes + 1)
-						= -(_disc.Ir[_disc.offsetMetric[parType]].segment(1, nNodes - 1).cwiseProduct(
-							_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
-								_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
-						* GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
+				// reduced system for remaining nodes
+				bnd_dispBlock.block(1, 0, nNodes - 1, nNodes + 1)
+					= (_disc.Dr[_disc.offsetMetric[parType]].block(1, 1, nNodes - 1, nNodes - 1)
+						- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1)
+						) * GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
 
-					// reduced system for remaining nodes
-					bnd_dispBlock.block(1, 0, nNodes - 1, nNodes + 1)
-						= (_disc.Dr[_disc.offsetMetric[parType]].block(1, 1, nNodes - 1, nNodes - 1)
-							- _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1)
-							) * GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
+				bnd_dispBlock.block(1, 0, nNodes - 1, 2 * nNodes)
+					+= _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1) * bnd_gStarDC.block(1, 0, nNodes - 1, 2 * nNodes);
 
-					bnd_dispBlock.block(1, 0, nNodes - 1, 2 * nNodes)
-						+= _disc.parInvWeights[parType].segment(1, nNodes - 1).asDiagonal() * B.block(1, 1, nNodes - 1, nNodes - 1) * bnd_gStarDC.block(1, 0, nNodes - 1, 2 * nNodes);
-
-					// mapping
-					bnd_dispBlock *= invMap * invMap;
-				}
+				// mapping
+				bnd_dispBlock *= invMap * invMap;
 			}
 
 			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
@@ -3079,30 +3087,24 @@ protected:
 			_cell = _disc.nParCell[parType] - 1;
 			invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + _cell]);
 
-			if (_disc.parExactInt[parType]) {
-				_disc.nParCell[parType] == 2 ? bnd_dispBlock = parSpecialBlockTwoCells(parType, true).block(0, 1, nNodes, 2 * nNodes)
-											 : bnd_dispBlock = parRightBndryCellBlock(parType).block(0, 1, nNodes, 2 * nNodes);
-			}
-			else {
-				MatrixXd bnd_gStarDC = MatrixXd::Zero(nNodes, 2 * nNodes);
-				// numerical flux contribution for left interface of right boundary cell -> d f^*_0 / d cp
-				bnd_gStarDC.setZero();
-				bnd_gStarDC.block(0, nNodes - 1, 1, nNodes + 1) = GBlock_r.block(0, 0, 1, nNodes + 1);
-				bnd_gStarDC.block(0, 0, 1, nNodes + 1) += GBlock_l.block(nNodes - 1, 0, 1, nNodes + 1);
-				bnd_gStarDC *= 0.5;
-				// dispBlock <- invMap * ( D_r * G_r - M^-1 * B * [G_r - g^*] )
-				bnd_dispBlock.setZero();
-				bnd_dispBlock.block(0, nNodes - 1, nNodes, nNodes + 1) = (_disc.Dr[_disc.offsetMetric[parType] + _cell] - _disc.parInvWeights[parType].asDiagonal() * B) * GBlock_r;
-				bnd_dispBlock.block(0, 0, nNodes, 2 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * bnd_gStarDC;
-				bnd_dispBlock *= invMap * invMap;
-			}
+			bnd_gStarDC = MatrixXd::Zero(nNodes, 2 * nNodes);
+			// numerical flux contribution for left interface of right boundary cell -> d f^*_0 / d cp
+			bnd_gStarDC.setZero();
+			bnd_gStarDC.block(0, nNodes - 1, 1, nNodes + 1) = GBlock_r.block(0, 0, 1, nNodes + 1);
+			bnd_gStarDC.block(0, 0, 1, nNodes + 1) += GBlock_l.block(nNodes - 1, 0, 1, nNodes + 1);
+			bnd_gStarDC *= 0.5;
+			// dispBlock <- invMap * ( D_r * G_r - M^-1 * B * [G_r - g^*] )
+			bnd_dispBlock.setZero();
+			bnd_dispBlock.block(0, nNodes - 1, nNodes, nNodes + 1) = (_disc.Dr[_disc.offsetMetric[parType] + _cell] - _disc.parInvWeights[parType].asDiagonal() * B) * GBlock_r;
+			bnd_dispBlock.block(0, 0, nNodes, 2 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * bnd_gStarDC;
+			bnd_dispBlock *= invMap * invMap;
 
 			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
 
 				unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
 				// start at first solid entry of last cell
 				linalg::BandedEigenSparseRowIterator jac_right(_globalJac, offset + (_disc.nParCell[parType] - 1) * sCell + idxr.strideParLiquid());
-				
+
 				for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_right += idxr.strideParLiquid()) {
 					for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 						for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_right) {
@@ -3116,92 +3118,58 @@ protected:
 
 			/*				inner cells				*/
 
-			if (_disc.parExactInt[parType]) {
-				for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
-					// metric (-> cell) dependent disp block
-					if(cell == 1)
-						_disc.nParCell[parType] == 3 ? dispBlock = parSpecialBlockThreeCells(parType).block(0, 1, nNodes, 3 * nNodes)
-													 : dispBlock = parLeftBndryCellNghbrBlock(parType).block(0, 1, nNodes, 3 * nNodes);
-					else if (cell == _disc.nParCell[parType] - 2)
-						dispBlock = parRightBndryCellNghbrBlock(parType).block(0, 1, nNodes, 3 * nNodes);
-					else
-						dispBlock = parInnerCellBlock(parType, cell).block(0, 1, nNodes, 3 * nNodes);
-
-					dispBlock = parInnerCellBlock(parType, cell).block(0, 1, nNodes, 3 * nNodes);
-
-					for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
-
-						unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-						// start at first solid entry of current inner cell
-						linalg::BandedEigenSparseRowIterator jac_inner(_globalJac, offset + cell * sCell + idxr.strideParLiquid());
-
-						for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_inner += idxr.strideParLiquid()) {
-							for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_inner) {
-									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
-										jac_inner[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, _disc.nParNode[parType] + node);
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			else {
-
 				// auxiliary block [ d g(c) / d c ] for inner cells
-				MatrixXd GBlock = MatrixXd::Zero(nNodes, nNodes + 2);
-				GBlock.block(0, 1, nNodes, nNodes) = _disc.parPolyDerM[parType];
-				GBlock(0, 0) -= 0.5 * _disc.parInvWeights[parType][0];
-				GBlock(0, 1) += 0.5 * _disc.parInvWeights[parType][0];
-				GBlock(nNodes - 1, nNodes) -= 0.5 * _disc.parInvWeights[parType][nNodes - 1];
-				GBlock(nNodes - 1, nNodes + 1) += 0.5 * _disc.parInvWeights[parType][nNodes - 1];
+			MatrixXd GBlock = MatrixXd::Zero(nNodes, nNodes + 2);
+			GBlock.block(0, 1, nNodes, nNodes) = _disc.parPolyDerM[parType];
+			GBlock(0, 0) -= 0.5 * _disc.parInvWeights[parType][0];
+			GBlock(0, 1) += 0.5 * _disc.parInvWeights[parType][0];
+			GBlock(nNodes - 1, nNodes) -= 0.5 * _disc.parInvWeights[parType][nNodes - 1];
+			GBlock(nNodes - 1, nNodes + 1) += 0.5 * _disc.parInvWeights[parType][nNodes - 1];
 
-				// numerical flux contribution
-				MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes);
-				gStarDC.block(0, nNodes - 1, 1, nNodes + 2) = GBlock.block(0, 0, 1, nNodes + 2);
-				gStarDC.block(0, 0, 1, nNodes + 1) += GBlock.block(nNodes - 1, 1, 1, nNodes + 1);
-				gStarDC.block(nNodes - 1, nNodes - 1, 1, nNodes + 2) += GBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-				gStarDC.block(nNodes - 1, 2 * nNodes - 1, 1, nNodes + 1) += GBlock.block(0, 0, 1, nNodes + 1);
-				gStarDC *= 0.5;
+			// numerical flux contribution
+			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes);
+			gStarDC.block(0, nNodes - 1, 1, nNodes + 2) = GBlock.block(0, 0, 1, nNodes + 2);
+			gStarDC.block(0, 0, 1, nNodes + 1) += GBlock.block(nNodes - 1, 1, 1, nNodes + 1);
+			gStarDC.block(nNodes - 1, nNodes - 1, 1, nNodes + 2) += GBlock.block(nNodes - 1, 0, 1, nNodes + 2);
+			gStarDC.block(nNodes - 1, 2 * nNodes - 1, 1, nNodes + 1) += GBlock.block(0, 0, 1, nNodes + 1);
+			gStarDC *= 0.5;
 
-				dispBlock.setZero();
-				// dispersion block part without metrics
-				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = -1.0 * _disc.parInvWeights[parType].asDiagonal() * B * GBlock;
-				dispBlock.block(0, 0, nNodes, 3 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * gStarDC;
+			dispBlock.setZero();
+			// dispersion block part without metrics
+			dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) = -1.0 * _disc.parInvWeights[parType].asDiagonal() * B * GBlock;
+			dispBlock.block(0, 0, nNodes, 3 * nNodes) += _disc.parInvWeights[parType].asDiagonal() * B * gStarDC;
 
-				for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
+			for (int cell = 1; cell < _disc.nParCell[parType] - 1; cell++) {
 
-					// add metric part, dependent on current cell
-					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
-					invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell]);
-					dispBlock *= invMap * invMap;
+				// add metric part, dependent on current cell
+				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) += _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
+				invMap = (2.0 / _disc.deltaR[_disc.offsetMetric[parType] + cell]);
+				dispBlock *= invMap * invMap;
 
-					for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
+				for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
 
-						unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
-						// start at first solid entry of current inner cell
-						linalg::BandedEigenSparseRowIterator jac_inner(_globalJac, offset + cell * sCell + idxr.strideParLiquid());
+					unsigned int offset = idxr.offsetCp(ParticleTypeIndex{ parType }, ParticleIndex{ colNode });
+					// start at first solid entry of current inner cell
+					linalg::BandedEigenSparseRowIterator jac_inner(_globalJac, offset + cell * sCell + idxr.strideParLiquid());
 
-						for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_inner += idxr.strideParLiquid()) {
-							for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-								for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_inner) {
-									if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
-										jac_inner[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, _disc.nParNode[parType] + node);
-									}
+					for (unsigned int node = 0; node < _disc.nParNode[parType]; node++, jac_inner += idxr.strideParLiquid()) {
+						for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+							for (unsigned int bnd = 0; bnd < _disc.nBound[parType * _disc.nComp + comp]; bnd++, ++jac_inner) {
+								if (static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]) != 0.0) {
+									jac_inner[0] += -(static_cast<double>(parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)])) * dispBlock(node, _disc.nParNode[parType] + node);
 								}
 							}
 						}
 					}
-
-					// substract metric part in preparation of next iteration
-					dispBlock /= invMap * invMap;
-					dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) -= _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
 				}
+
+				// substract metric part in preparation of next iteration
+				dispBlock /= invMap * invMap;
+				dispBlock.block(0, nNodes - 1, nNodes, nNodes + 2) -= _disc.Dr[_disc.offsetMetric[parType] + cell] * GBlock;
 			}
 		} // if nCells > 1
 
-		return 0;
+		return 1;
 	}
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
@@ -3328,7 +3296,7 @@ protected:
 			}
 		}
 
-		return 0;
+		return 1;
 	}
 	/**
 	 * @brief inserts a state block with different factors for components into the system jacobian.
@@ -3389,6 +3357,31 @@ protected:
 						// row: at current node component
 						// col: jump to node j
 						jac[(j - i) * strideNode + offRowToCol] += block(i, j);
+					}
+				}
+			}
+		}
+	}
+	/**
+	 * @brief adds a state block into the system jacobian.
+	 * @param [in] block (sub)block whose diagonal entries are to be added
+	 * @param [in] jac row iterator at first (i.e. upper) entry
+	 * @param [in] idxr Indexer
+	 * @param [in] surfDiff pointer to surfaceDiffusion storage
+	 * @param [in] nonKinetic pointer to binding kinetics
+	 * @param [in] type particle type
+	 */
+	template<typename ParamType>
+	void addDiagonalSolidJacobianEntries(Eigen::MatrixXd block, linalg::BandedEigenSparseRowIterator& jac, Indexer& idxr, ParamType* surfDiff, const int* nonKinetic, unsigned int type) {
+
+		for (unsigned int i = 0; i < block.rows(); i++, jac += idxr.strideParLiquid()) {
+			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+				for (unsigned int bnd = 0; bnd < _disc.nBound[type * _disc.nComp + comp]; bnd++, ++jac) {
+					if (static_cast<double>(surfDiff[_disc.offsetSurfDiff[idxr.offsetBoundComp(ParticleTypeIndex{ type }, ComponentIndex{ comp }) + bnd]]) != 0.0
+						&& !nonKinetic[idxr.offsetBoundComp(ParticleTypeIndex{ type }, ComponentIndex{ comp }) + bnd]) {
+						// row, col: at current node and bound state
+						jac[0] += block(i, i)
+							* static_cast<double>(surfDiff[_disc.offsetSurfDiff[idxr.offsetBoundComp(ParticleTypeIndex{ type }, ComponentIndex{ comp }) + bnd]]);
 					}
 				}
 			}
@@ -3537,316 +3530,7 @@ protected:
 		if (_disc.nCol > 1) // iterator already moved to second cell
 			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, -idxr.strideColNode(), idxr, _disc.nCol - 1, idxr.strideColNode());
 
-		return 0;
-	}
-
-	Eigen::MatrixXd getParGBlock(int parType, int cell) {
-
-		int nNodes = _disc.nParNode[parType];
-		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = MatrixXd::Zero(nNodes, nNodes + 2);
-		gBlock.block(0, 1, nNodes, nNodes) = _disc.parPolyDerM[parType];
-		gBlock.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		gBlock.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		gBlock.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		gBlock.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		gBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return gBlock;
-	}
-
-	Eigen::MatrixXd getParBMatrix(int nNodes, int parType, int cell) {
-		// also known as "lifting" matrix and includes metric dependent terms for particle discretization
-		MatrixXd B = MatrixXd::Zero(nNodes, nNodes);
-		if (_parGeomSurfToVol[parType] == _disc.SurfVolRatioSlab) {
-			B(0, 0) = -1.0;
-			B(nNodes - 1, nNodes - 1) = 1.0;
-		} 
-		else {
-			B(0, 0) = -_disc.Ir[_disc.offsetMetric[parType] + cell][0];
-			B(nNodes - 1, nNodes - 1) = _disc.Ir[_disc.offsetMetric[parType] + cell][nNodes - 1];
-		}
-
-		return B;
-	}
-
-	Eigen::MatrixXd parInnerCellBlock(int parType, int cell) {
-
-		int nNodes = _disc.nParNode[parType];
-		// Auxiliary Block [ d g(c) / d c ], additionally depends on boundary entries of neighbouring cells
-		MatrixXd gBlock = getParGBlock(parType, cell);
-
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-
-		// Inner dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2); //
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		// NOTE: N = polyDeg
-		//  indices  gStarDC    :     0   ,   1   , ..., nNodes; nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
-		//	derivative index j  : -(N+1)-1, -(N+1),... ,  -1   ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
-		// auxiliary block [d g^* / d c]
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-
-		//  indices  dispBlock :   0	 ,   1   , ..., nNodes;	nNodes+1, ..., 2 * nNodes;	2*nNodes+1, ..., 3 * nNodes; 3*nNodes+1
-		//	derivative index j  : -(N+1)-1, -(N+1),...,	 -1	  ;   0     , ...,		N	 ;	  N + 1	  , ..., 2N + 2    ; 2(N+1) +1
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
-			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-		}
-		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd parLeftBndryCellNghbrBlock(int parType) {
-
-		int cell = 1;
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType, cell);
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
-			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-		}
-		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd parRightBndryCellNghbrBlock(int parType) {
-
-		int cell = _disc.nParCell[parType] - 2;
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType, cell);
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * gBlock;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
-			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-		}
-		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd parLeftBndryCellBlock(int parType) {
-
-		int cell = 0;
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType, cell);
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
-			dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_l - _disc.parInvMM[parType] * B * GBlockBound_l;
-			dispBlock.block(0, nNodes + 1, nNodes, 2 * nNodes + 1) += _disc.parInvMM[parType] * B * gStarDC.block(0, nNodes + 1, nNodes, 2 * nNodes + 1);
-		}
-
-		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd parRightBndryCellBlock(int parType) {
-
-		int cell = _disc.nParCell[parType] - 1;
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType, cell);
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, cell);
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * B * gStarDC;
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[parType] * B * GBlockBound_r;
-			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-		}
-		dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-
-		return dispBlock;
-	}
-
-	Eigen::MatrixXd parSpecialBlockTwoCells(int parType, bool right) {
-
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);// Dispersion block [ d RHS_disp / d c ]
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 0];
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
-		
-		if (right) { // right boundary cell
-			int cell = 1;
-			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(0, nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			gStarDC *= 0.5;
-
-			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_r;
-				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-			}
-			else {
-				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_r - _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * GBlockBound_r;
-				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-			}
-
-			return dispBlock;
-		}
-		else { // left boundary cell
-			int cell = 0;
-			// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-			MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-			gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-			gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-			gStarDC *= 0.5;
-
-			if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + cell] * GBlockBound_l;
-				dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + cell] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-			}
-			else {
-				dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * GBlockBound_l - _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * GBlockBound_l;
-				dispBlock += _disc.parInvMM[parType] * getParBMatrix(nNodes, parType, cell) * gStarDC;
-				dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + cell];
-			}
-
-			return dispBlock;
-		}
-	}
-
-	Eigen::MatrixXd parSpecialBlockThreeCells(int parType) {
-
-		int nNodes = _disc.nParNode[parType];
-		MatrixXd gBlock = getParGBlock(parType, 1);
-		// B matrix from DG scheme
-		MatrixXd B = getParBMatrix(nNodes, parType, 1);
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_l = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_l.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_l.block(0, nNodes, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l.block(0, nNodes + 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, nNodes - 1, nNodes, 1);
-		GBlockBound_l *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 0];
-		// boundary auxiliary block [ d g(c) / d c ]
-		MatrixXd GBlockBound_r = MatrixXd::Zero(nNodes, nNodes + 2);
-		GBlockBound_r.block(0, 1, nNodes, nNodes) += _disc.parPolyDerM[parType];
-		GBlockBound_r.block(0, 0, nNodes, 1) -= 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r.block(0, 1, nNodes, 1) += 0.5 * _disc.parInvMM_Leg[parType].block(0, 0, nNodes, 1);
-		GBlockBound_r *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 2];
-		// auxiliary block [ d g^* / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd gStarDC = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		gStarDC.block(0, nNodes, 1, nNodes + 2) += gBlock.block(0, 0, 1, nNodes + 2);
-		gStarDC.block(0, 0, 1, nNodes + 2) += GBlockBound_l.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, nNodes, 1, nNodes + 2) += gBlock.block(nNodes - 1, 0, 1, nNodes + 2);
-		gStarDC.block(nNodes - 1, 2 * nNodes, 1, nNodes + 2) += GBlockBound_r.block(0, 0, 1, nNodes + 2);
-		gStarDC *= 0.5;
-
-		// Dispersion block [ d RHS_disp / d c ], depends on whole previous and subsequent cell plus first entries of subsubsequent cells
-		MatrixXd dispBlock = MatrixXd::Zero(nNodes, 3 * nNodes + 2);
-		if (_parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.minus_InvMM_ST[_disc.offsetMetric[parType] + 1] * gBlock;
-			dispBlock += _disc.parInvMM[_disc.offsetMetric[parType] + 1] * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
-		}
-		else {
-			dispBlock.block(0, nNodes, nNodes, nNodes + 2) += _disc.parPolyDerM[parType] * gBlock - _disc.parInvMM[parType] * B * gBlock;
-			dispBlock += _disc.parInvMM[parType] * B * gStarDC;
-			dispBlock *= 2 / _disc.deltaR[_disc.offsetMetric[parType] + 1];
-		}
-
-		return dispBlock;
+		return 1;
 	}
 	/**
 	* @brief analytically calculates the static (per section) bulk jacobian (inlet DOFs included!)
@@ -3860,10 +3544,7 @@ protected:
 		else
 			calcConvDispCollocationDGSEMJacobian();
 
-		if (!_globalJac.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
-			return 0;
-
-		return 1;
+		return _globalJac.isCompressed(); // if matrix lost its compressed storage, the pattern did not fit.
 	}
 
 	/**
@@ -3874,9 +3555,9 @@ protected:
 
 		// DG particle dispersion Jacobian
 		if(_disc.parExactInt[parType])
-			calcParticleJacobianExInt(parType, colNode, parDiff, parSurfDiff, invBetaP);
+			calcParticleDGSEMJacobian(parType, colNode, parDiff, parSurfDiff, invBetaP);
 		else // deprecated
-			calcParticleJacobianInexInt(parType, colNode, parDiff, parSurfDiff, invBetaP);
+			calcParticleCollocationDGSEMJacobian(parType, colNode, parDiff, parSurfDiff, invBetaP);
 
 		return _globalJac.isCompressed(); // if matrix lost its compressed storage, the calculation did not fit the pre-defined pattern.
 	}
@@ -3957,9 +3638,7 @@ protected:
 
 			// lifting matrix entry for exact integration scheme depends on metrics for sphere and cylinder
 			double exIntLiftContribution = _disc.Ir[_disc.offsetMetric[type] + _disc.nParCell[type] - 1][_disc.nParNode[type] - 1];
-			if (_parGeomSurfToVol[type] == _disc.SurfVolRatioCylinder)
-				exIntLiftContribution = _disc.Ir[_disc.offsetMetric[type] + _disc.nParCell[type] - 1][_disc.nParNode[type] - 1];
-			else if (_parGeomSurfToVol[type] == _disc.SurfVolRatioSlab)
+			if (_parGeomSurfToVol[type] == _disc.SurfVolRatioSlab)
 				exIntLiftContribution = 1.0;
 
 			// Ordering of diffusion:
@@ -4016,7 +3695,7 @@ protected:
 			}
 		}
 
-		return 0;
+		return 1;
 	}
 
 	int calcStaticAnaJacobian_GRM(unsigned int secIdx) {
@@ -4042,7 +3721,6 @@ protected:
 				}
 
 				calcStaticAnaParticleDispJacobian(type, colNode, parDiff, parSurfDiff, invBetaP);
-				
 			}
 		}
 
