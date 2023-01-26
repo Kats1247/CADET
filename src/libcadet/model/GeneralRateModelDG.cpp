@@ -145,9 +145,11 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	if (_disc.nCol < 1)
 		throw InvalidParameterException("Number of column cells must be at least 1!");
 
-	_disc.polyDeg = paramProvider.getInt("POLYDEG");
-	if (_disc.polyDeg < 1)
+	if (paramProvider.getInt("POLYDEG") < 0)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
+	else
+		_disc.polyDeg = paramProvider.getInt("POLYDEG");
+
 	if (_disc.polyDeg < 3)
 		LOG(Warning) << "Polynomial degree > 2 in bulk discretization (cf. POLYDEG) is always recommended for performance reasons.";
 
@@ -892,16 +894,15 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 	// calculate offsets between surface diffusion storage and state vector order
 	orderSurfDiff();
 
-	// Setup flux Jacobian blocks at the beginning of the simulation or in case of
-	// section dependent film or particle diffusion coefficients
-	if ((secIdx == 0) || isSectionDependent(_filmDiffusionMode) || isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
-		assembleOffdiagJac(t, secIdx, simState.vecStateY);
-
 	Indexer idxr(_disc);
+
+	// todo: only reset jacobian pattern if it changes, i.e. once in configuration and then only for changes in SurfDiff+kinetic binding.
+ 	setJacobianPattern_GRM(_globalJac, 0);
+	_globalJacDisc = _globalJac;
 
 	// ConvectionDispersionOperator tells us whether flow direction has changed
 	if (!_convDispOpB.notifyDiscontinuousSectionTransition(t, secIdx)) {
-		// (re)compute DG Jaconian blocks
+		// (re)compute DG Jaconian blocks (can only be done after notify)
 		updateSection(secIdx);
 		_disc.initializeDGjac(_parGeomSurfToVol);
 		return;
@@ -1180,8 +1181,6 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 
 	if (wantJac && _disc.newStaticJac) {
 
-		//// if surface diffusion parameter changes to zero in section transition, the jacobian pattern also changes (special case SurfDiff+kinetic binding)
-		//// @TODO, does this ever happen? if so, also reset pattern.
 		// estimate new static (per section) jacobian
 		bool success = calcStaticAnaJacobian_GRM(secIdx);
 
@@ -1549,22 +1548,6 @@ parts::cell::CellParameters GeneralRateModelDG::makeCellResidualParams(unsigned 
 			_binding[parType],
 			(_dynReaction[parType] && (_dynReaction[parType]->numReactionsCombined() > 0)) ? _dynReaction[parType] : nullptr
 		};
-}
-
-/**
- * @brief Assembles film diffusion jacobian blocks
- * @details Assembles the fixed blocks @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$,
- *			and @f$ J_{0,f}, \dots, J_{N_p,f} @f$ and @f$ J_{f,0}, \dots, J_{f, N_p}. @f$
- *          The blocks are fixed for each section.
- * @param [in] t Current time
- * @param [in] secIdx Index of the current section
- * @param [in] vecStateY Current state vector
- */
-void GeneralRateModelDG::assembleOffdiagJac(double t, unsigned int secIdx, double const* vecStateY)
-{
-	// this function is outsourced to the hpp as this computations are also required there
-	calcFluxJacobians(secIdx);
-
 }
 // todo sensitivities
 int GeneralRateModelDG::residualSensFwdWithJacobian(const SimulationTime& simTime, const ConstSimulationState& simState, const AdJacobianParams& adJac, util::ThreadLocalStorage& threadLocalMem)
