@@ -145,7 +145,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 	if (_disc.nCol < 1)
 		throw InvalidParameterException("Number of column cells must be at least 1!");
 
-	if (paramProvider.getInt("POLYDEG") < 0)
+	if (paramProvider.getInt("POLYDEG") < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 	else
 		_disc.polyDeg = paramProvider.getInt("POLYDEG");
@@ -908,7 +908,7 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 		return;
 	}
 	else {
-		// (re)compute DG Jaconian blocks
+		// (re)compute DG Jacobian blocks
 		updateSection(secIdx);
 		_disc.initializeDGjac(_parGeomSurfToVol);
 	}
@@ -1059,7 +1059,7 @@ int GeneralRateModelDG::residualWithJacobian(const SimulationTime& simTime, cons
 {
 	BENCH_SCOPE(_timerResidual);
 
-	//FDJac = calcFDJacobian(simTime, threadLocalMem, 2.0); // todo delete
+	//FDJac = calcFDJacobian(static_cast<const double*>(simState.vecStateY), static_cast<const double*>(simState.vecStateYdot), simTime, threadLocalMem, 2.0); // todo delete
 
 	// Evaluate residual, use AD for Jacobian if required but do not evaluate parameter derivatives
 	return residual(simTime, simState, res, adJac, threadLocalMem, true, false);

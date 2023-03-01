@@ -111,9 +111,10 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	if (_disc.nCol < 1)
 		throw InvalidParameterException("Number of column cells must be at least 1!");
 
-	_disc.polyDeg = paramProvider.getInt("POLYDEG");
-	if (_disc.polyDeg < 1)
+	if (paramProvider.getInt("POLYDEG") < 0)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
+	else
+		_disc.polyDeg = paramProvider.getInt("POLYDEG");
 
 	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
