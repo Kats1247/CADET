@@ -36,8 +36,8 @@
 #include <vector>
 
 #include "Benchmark.hpp"
-#include "C:/Users/jmbr/vcpkg/installed/x64-windows/include/eigen3/Eigen/Dense.hpp"
-#include "C:/Users/jmbr/vcpkg/installed/x64-windows/include/eigen3/Eigen/Sparse.hpp"
+#include <Eigen/Dense> // use LA lib Eigen for Matrix operations
+#include <Eigen/Sparse>
 #ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES
 #include <math.h>

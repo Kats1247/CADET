@@ -107,7 +107,7 @@ namespace cadet
 				throw InvalidParameterException("Number of column cells must be at least 1!");
 			_disc.nCol = paramProvider.getInt("NCOL");
 
-			if (paramProvider.getInt("POLYDEG") < 0)
+			if (paramProvider.getInt("POLYDEG") < 1)
 				throw InvalidParameterException("Polynomial degree must be at least 1!");
 			_disc.polyDeg = paramProvider.getInt("POLYDEG");
 
