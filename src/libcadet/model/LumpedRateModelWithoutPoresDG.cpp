@@ -683,6 +683,8 @@ namespace cadet
 					else
 						cRes_comp = cDot_comp - cRes_comp;
 				}
+				else
+					cRes_comp *= -1.0;
 			}
 
 			return 0;
@@ -850,7 +852,6 @@ namespace cadet
 			const ConstSimulationState& simState)
 		{
 			BENCH_SCOPE(_timerLinearSolve);
-			//auto start = std::chrono::high_resolution_clock::now();
 
 			Indexer idxr(_disc);
 
@@ -904,38 +905,18 @@ namespace cadet
 			// solve J x = rhs
 			Eigen::Map<VectorXd> r(rhs, numDofs());
 
-			// todo iterative solver?
-			//Eigen::BiCGSTAB<Eigen::SparseMatrix<double, RowMajor>, Eigen::DiagonalPreconditioner<double>> solver;
-			//Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
-
 			// Factorize Jacobian only if required
 			if (_factorizeJacobian)
 			{
-				//auto start3 = std::chrono::high_resolution_clock::now();
-				//_linSolver.compute(_jacDisc);
 				_linSolver.factorize(_jacDisc);
-				//auto stop3 = std::chrono::high_resolution_clock::now();
-				//auto duration3 = std::chrono::duration_cast<std::chrono::microseconds>(stop3 - start3);
-				//std::cout << "factorize duration: " << duration3.count() << std::endl;
+
 				if (_linSolver.info() != Success) {
 					LOG(Error) << "factorization failed";
 					success = false;
 				}
-
 			}
 
-			// tmpstate needed for (slightly faster?) iterative solver
-			//auto start5 = std::chrono::high_resolution_clock::now();
-			//_tempState = new double[numDofs()];
-			//Eigen::Map<VectorXd> tmpstate(_tempState, numDofs());
-			//tmpstate = r;
-			//auto stop5 = std::chrono::high_resolution_clock::now();
-			//auto duration5 = std::chrono::duration_cast<std::chrono::microseconds>(stop5 - start5);
-			//std::cout << "tmpstate duration: " << duration5.count() << std::endl;
-
 			// Use the factors to solve the linear system 
-			//auto start6 = std::chrono::high_resolution_clock::now();
-			//r.segment(_disc.nComp, numPureDofs()) = solver.solve(tmpstate.segment(_disc.nComp, numPureDofs()));
 			r.segment(idxr.offsetC(), numPureDofs()) = _linSolver.solve(r.segment(idxr.offsetC(), numPureDofs()));
 
 			if (_linSolver.info() != Success) {
@@ -949,16 +930,6 @@ namespace cadet
 					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 				}
 			}
-
-			//auto stop = std::chrono::high_resolution_clock::now();
-			//auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-			//std::cout << "linear solve duration: " << duration.count() << std::endl;
-
-			//std::cout << "#iterations:     " << solver.iterations() << std::endl;
-			//std::cout << "estimated error: " << solver.error() << std::endl;
-
-			//std::cout << "t= " << t << "  x_in = [" << r[0] << ", " << r[1] << "]" << std::endl;
-			//std::cout << "linSol x:\n" << r << std::endl;
 
 			return (success && result) ? 0 : 1;
 		}
@@ -1341,7 +1312,7 @@ namespace cadet
 				_binding[0]->postConsistentInitialState(simTime.t, simTime.secIdx, colPos, qShell, qShell - idxr.strideColLiquid(), tlmAlloc);
 			} CADET_PARFOR_END;
 
-			// reset _jacDisc
+			// restore _jacDisc pattern
 			setPattern(_jacDisc, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
 
 		}
@@ -1381,88 +1352,88 @@ namespace cadet
 
 			Indexer idxr(_disc);
 
-			// Step 2: Compute the correct time derivative of the state vector
+			//// Step 2: Compute the correct time derivative of the state vector
 
-			// Note that the residual has not been negated, yet. We will do that now.
+			//// Note that the residual has not been negated, yet. We will do that now.
 			for (unsigned int i = 0; i < numDofs(); ++i)
 				vecStateYdot[i] = -vecStateYdot[i];
 
-			//double* vals = _jacDisc.valuePtr();
-			//for (unsigned int nz = 0; nz < _jacDisc.nonZeros(); nz++)
-			//	vals[nz] = 0.0;
+			double* entries = _jacDisc.valuePtr();
+			for (unsigned int nz = 0; nz < _jacDisc.nonZeros(); nz++)
+				entries[nz] = 0.0;
 
-			//// Handle transport equations (dc_i / dt terms)
-			//const int gapNode = idxr.strideColNode() - static_cast<int>(_disc.nComp) * idxr.strideColComp();
-			//linalg::BandedEigenSparseRowIterator jac(_jacDisc, 0);
-			//for (unsigned int i = 0; i < _disc.nPoints; ++i, jac += gapNode)
-			//{
-			//	for (unsigned int j = 0; j < _disc.nComp; ++j, ++jac)
-			//	{
-			//		// Add time derivative to liquid states (on main diagonal)
-			//		jac[0] += 1.0;
-			//	}
-			//}
+			// Handle transport equations (dc_i / dt terms)
+			const int gapNode = idxr.strideColNode() - static_cast<int>(_disc.nComp) * idxr.strideColComp();
+			linalg::BandedEigenSparseRowIterator jac(_jacDisc, 0);
+			for (unsigned int i = 0; i < _disc.nPoints; ++i, jac += gapNode)
+			{
+				for (unsigned int j = 0; j < _disc.nComp; ++j, ++jac)
+				{
+					// Add time derivative to liquid states (on main diagonal)
+					jac[0] += 1.0;
+				}
+			}
 
-			//const double invBeta = 1.0 / static_cast<double>(_totalPorosity) - 1.0;
-			//double* const dFluxDt = _tempState + idxr.offsetC();
-			//LinearBufferAllocator tlmAlloc = threadLocalMem.get();
-			//for (unsigned int col = 0; col < _disc.nPoints; ++col)
-			//{
-			//	// Assemble
-			//	linalg::BandedEigenSparseRowIterator jac(_jacDisc, idxr.strideColNode() * col);
+			const double invBeta = 1.0 / static_cast<double>(_totalPorosity) - 1.0;
+			double* const dFluxDt = _tempState + idxr.offsetC();
+			LinearBufferAllocator tlmAlloc = threadLocalMem.get();
+			for (unsigned int col = 0; col < _disc.nPoints; ++col)
+			{
+				// Assemble
+				linalg::BandedEigenSparseRowIterator jac(_jacDisc, idxr.strideColNode() * col);
 
-			//	// Mobile and solid phase (advances jac accordingly)
-			//	addTimeDerivativeToJacobianNode(jac, idxr, 1.0, invBeta);
+				// Mobile and solid phase (advances jac accordingly)
+				addTimeDerivativeToJacobianNode(jac, idxr, 1.0, invBeta);
 
-			//	// Stationary phase
-			//	if (!_binding[0]->hasQuasiStationaryReactions())
-			//		continue;
+				// Stationary phase
+				if (!_binding[0]->hasQuasiStationaryReactions())
+					continue;
 
-			//	// Midpoint of current column node (z coordinate) - needed in externally dependent adsorption kinetic
-			//	double z = _disc.deltaZ * std::floor(col / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[col % _disc.nNodes]);
+				// Midpoint of current column node (z coordinate) - needed in externally dependent adsorption kinetic
+				double z = _disc.deltaZ * std::floor(col / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[col % _disc.nNodes]);
 
-			//	// Get iterators to beginning of solid phase
-			//	linalg::BandedEigenSparseRowIterator jacSolidOrig(_jac, idxr.strideColNode() * col + idxr.strideColLiquid());
-			//	linalg::BandedEigenSparseRowIterator jacSolid = jac - idxr.strideColBound();
+				// Get iterators to beginning of solid phase
+				linalg::BandedEigenSparseRowIterator jacSolidOrig(_jac, idxr.strideColNode() * col + idxr.strideColLiquid());
+				linalg::BandedEigenSparseRowIterator jacSolid = jac - idxr.strideColBound();
 
-			//	int const* const mask = _binding[0]->reactionQuasiStationarity();
-			//	double* const qNodeDot = vecStateYdot + idxr.offsetC() + col * idxr.strideColNode() + idxr.strideColLiquid();
+				int const* const mask = _binding[0]->reactionQuasiStationarity();
+				double* const qNodeDot = vecStateYdot + idxr.offsetC() + col * idxr.strideColNode() + idxr.strideColLiquid();
 
-			//	// Obtain derivative of fluxes wrt. time
-			//	std::fill_n(dFluxDt, _disc.strideBound, 0.0);
-			//	if (_binding[0]->dependsOnTime())
-			//	{
-			//		_binding[0]->timeDerivativeQuasiStationaryFluxes(simTime.t, simTime.secIdx, ColumnPosition{ z, 0.0, 0.0 },
-			//			qNodeDot - _disc.nComp, qNodeDot, dFluxDt, tlmAlloc);
-			//	}
+				// Obtain derivative of fluxes wrt. time
+				std::fill_n(dFluxDt, _disc.strideBound, 0.0);
+				if (_binding[0]->dependsOnTime())
+				{
+					_binding[0]->timeDerivativeQuasiStationaryFluxes(simTime.t, simTime.secIdx, ColumnPosition{ z, 0.0, 0.0 },
+						qNodeDot - _disc.nComp, qNodeDot, dFluxDt, tlmAlloc);
+				}
 
-			//	// Copy row from original Jacobian and set right hand side
-			//	for (unsigned int i = 0; i < _disc.strideBound; ++i, ++jacSolid, ++jacSolidOrig)
-			//	{
-			//		if (!mask[i])
-			//			continue;
+				// Copy row from original Jacobian and set right hand side
+				for (unsigned int i = 0; i < _disc.strideBound; ++i, ++jacSolid, ++jacSolidOrig)
+				{
+					if (!mask[i])
+						continue;
 
-			//		jacSolid.copyRowFrom(jacSolidOrig);
-			//		qNodeDot[i] = -dFluxDt[i];
-			//	}
-			//}
+					jacSolid.copyRowFrom(jacSolidOrig);
+					qNodeDot[i] = -dFluxDt[i];
+				}
+			}
 
-			//_linSolver.factorize(_jacDisc);
-			//
-			//if (_linSolver.info() != Success) {
-			//	LOG(Error) << "factorization failed in consistent initialization";
-			//}
+			_linSolver.factorize(_jacDisc);
+			
+			if (_linSolver.info() != Success) {
+				LOG(Error) << "factorization failed in consistent initialization";
+			}
 
-			//Eigen::Map<VectorXd> yp(vecStateYdot + idxr.offsetC(), numPureDofs());
+			Eigen::Map<VectorXd> yp(vecStateYdot + idxr.offsetC(), numPureDofs());
 
-			//yp = _linSolver.solve(yp);
+			yp = _linSolver.solve(yp);
 
-			//if (_linSolver.info() != Success) {
-			//	LOG(Error) << "Solve failed in consistent initialization";
-			//}
+			if (_linSolver.info() != Success) {
+				LOG(Error) << "Solve failed in consistent initialization";
+			}
 
-			//// reset jacobian pattern
-			//setPattern(_jacDisc, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
+			// reset jacobian pattern
+			setPattern(_jacDisc, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
 
 		}
 
