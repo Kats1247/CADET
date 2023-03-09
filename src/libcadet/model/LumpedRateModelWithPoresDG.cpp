@@ -111,7 +111,7 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	if (_disc.nCol < 1)
 		throw InvalidParameterException("Number of column cells must be at least 1!");
 
-	if (paramProvider.getInt("POLYDEG") < 0)
+	if (paramProvider.getInt("POLYDEG") < 1)
 		throw InvalidParameterException("Polynomial degree must be at least 1!");
 	else
 		_disc.polyDeg = paramProvider.getInt("POLYDEG");
@@ -239,19 +239,6 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 	// Allocate memory
 	Indexer idxr(_disc);
 
-	if (_disc.exactInt)
-		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
-	else
-		_jacInlet.resize(1, 1); // first cell depends on inlet concentration (same for every component)
-	_globalJac.resize(numPureDofs(), numPureDofs());
-	_globalJacDisc.resize(numPureDofs(), numPureDofs());
-	setGlobalJacPattern(_globalJac);
-	_globalJacDisc = _globalJac;
-
-	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
-	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
-	_globalSolver.analyzePattern(_globalJacDisc);
-
 	// Set whether analytic Jacobian is used
 	useAnalyticJacobian(analyticJac);
 
@@ -361,6 +348,19 @@ bool LumpedRateModelWithPoresDG::configureModelDiscretization(IParameterProvider
 
 	// Setup the memory for tempState based on state vector
 	_tempState = new double[numDofs()];
+
+	// Allocate Jacobian memory, set and analyze pattern
+	if (_disc.exactInt)
+		_jacInlet.resize(_disc.nNodes, 1); // first cell depends on inlet concentration (same for every component)
+	else
+		_jacInlet.resize(1, 1); // first cell depends on inlet concentration (same for every component)
+	_globalJac.resize(numPureDofs(), numPureDofs());
+	_globalJacDisc.resize(numPureDofs(), numPureDofs());
+	setGlobalJacPattern(_globalJac, _dynReactionBulk);
+	_globalJacDisc = _globalJac;
+	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
+	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
+	_globalSolver.analyzePattern(_globalJacDisc);
 
 	return transportSuccess && bindingConfSuccess && reactionConfSuccess;
 }
@@ -982,25 +982,23 @@ int LumpedRateModelWithPoresDG::residualBulk(double t, unsigned int secIdx, Stat
 	if (!_dynReactionBulk || (_dynReactionBulk->numReactionsLiquid() == 0))
 		return 0;
 
-	// @TODO: dynamic reactions
+	// Dynamic bulk reactions
+	StateType const* y = yBase + idxr.offsetC();
+	ResidualType* res = resBase + idxr.offsetC();
+	LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
-	//// Get offsets
-	//Indexer idxr(_disc);
-	//StateType const* y = yBase + idxr.offsetC();
-	//ResidualType* res = resBase + idxr.offsetC();
-	//LinearBufferAllocator tlmAlloc = threadLocalMem.get();
+	for (unsigned int col = 0; col < _disc.nPoints; ++col, y += idxr.strideColNode(), res += idxr.strideColNode())
+	{
+		const ColumnPosition colPos{ (0.5 + static_cast<double>(col)) / static_cast<double>(_disc.nCol), 0.0, 0.0 };
+		_dynReactionBulk->residualLiquidAdd(t, secIdx, colPos, y, res, -1.0, tlmAlloc);
 
-	//for (unsigned int col = 0; col < _disc.nPoints; ++col, y += idxr.strideColNode(), res += idxr.strideColNode())
-	//{
-	//	const ColumnPosition colPos{ (0.5 + static_cast<double>(col)) / static_cast<double>(_disc.nCol), 0.0, 0.0 };
-	//	_dynReactionBulk->residualLiquidAdd(t, secIdx, colPos, y, res, -1.0, tlmAlloc);
-
-	//	if (wantJac)
-	//	{
-	//		// static_cast should be sufficient here, but this statement is also analyzed when wantJac = false
-	//		_dynReactionBulk->analyticJacobianLiquidAdd(t, secIdx, colPos, reinterpret_cast<double const*>(y), -1.0, _convDispOp.jacobian().row(col * idxr.strideColNode()), tlmAlloc);
-	//	}
-	//}
+		if (wantJac)
+		{
+			linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, col * idxr.strideColNode());
+			// static_cast should be sufficient here, but this statement is also analyzed when wantJac = false
+			_dynReactionBulk->analyticJacobianLiquidAdd(t, secIdx, colPos, reinterpret_cast<double const*>(y), -1.0, jac, tlmAlloc);
+		}
+	}
 
 	return 0;
 }

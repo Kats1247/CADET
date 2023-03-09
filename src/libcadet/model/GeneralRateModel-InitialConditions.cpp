@@ -1904,7 +1904,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			}
 
 			// reset jacobian pattern
-			setJacobianPattern_GRM(_globalJacDisc, _disc.curSection);
+			setJacobianPattern_GRM(_globalJacDisc, _disc.curSection, _dynReactionBulk);
 
 		} CADET_PARFOR_END;
 	}
