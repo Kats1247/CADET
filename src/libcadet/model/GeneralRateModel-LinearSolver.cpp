@@ -618,7 +618,7 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 
 		// Assemble and factorize discretized bulk Jacobian
 		assembleDiscretizedGlobalJacobian(alpha, idxr);
-		
+
 		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
 
 		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
@@ -632,10 +632,13 @@ int GeneralRateModelDG::linearSolve(double t, double alpha, double outerTol, dou
 
 	// ==== Step 1.5: Solve J c_uo = b_uo - A * c_in = b_uo - A*b_in
 
-	// handle inlet DOFs
+	// Handle inlet DOFs:
+	// Inlet at z = 0 for forward flow, at z = L for backward flow.
+	unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+
 	for (int comp = 0; comp < _disc.nComp; comp++) {
 		for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
-			r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
+			r[idxr.offsetC() + offInlet + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 		}
 	}
 
