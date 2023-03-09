@@ -806,7 +806,7 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 	}
 
 	// jaobian pattern set after binding and particle surface diffusion are configured
-	setJacobianPattern_GRM(_globalJac, 0);
+	setJacobianPattern_GRM(_globalJac, 0, _dynReactionBulk);
 	_globalJacDisc = _globalJac;
 	// the solver repetitively solves the linear system with a static pattern of the jacobian (set above). 
 	// The goal of analyzePattern() is to reorder the nonzero elements of the matrix, such that the factorization step creates less fill-in
@@ -897,7 +897,7 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 	Indexer idxr(_disc);
 
 	// todo: only reset jacobian pattern if it changes, i.e. once in configuration and then only for changes in SurfDiff+kinetic binding.
- 	setJacobianPattern_GRM(_globalJac, 0);
+ 	setJacobianPattern_GRM(_globalJac, 0, _dynReactionBulk);
 	_globalJacDisc = _globalJac;
 
 	// ConvectionDispersionOperator tells us whether flow direction has changed
@@ -1257,25 +1257,26 @@ int GeneralRateModelDG::residualBulk(double t, unsigned int secIdx, StateType co
 	if (!_dynReactionBulk || (_dynReactionBulk->numReactionsLiquid() == 0))
 		return 0;
 
-	// @TODO: dynamic reactions
+	// Dynamic reactions
+	if (_dynReactionBulk) {
+		// Get offsets
+		StateType const* y = yBase + idxr.offsetC();
+		ResidualType* res = resBase + idxr.offsetC();
+		LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
-	//// Get offsets
-	//Indexer idxr(_disc);
-	//StateType const* y = yBase + idxr.offsetC();
-	//ResidualType* res = resBase + idxr.offsetC();
-	//LinearBufferAllocator tlmAlloc = threadLocalMem.get();
+		for (unsigned int col = 0; col < _disc.nPoints; ++col, y += idxr.strideColNode(), res += idxr.strideColNode())
+		{
+			const ColumnPosition colPos{ (0.5 + static_cast<double>(col)) / static_cast<double>(_disc.nPoints), 0.0, 0.0 };
+			_dynReactionBulk->residualLiquidAdd(t, secIdx, colPos, y, res, -1.0, tlmAlloc);
 
-	//for (unsigned int col = 0; col < _disc.nPoints; ++col, y += idxr.strideColNode(), res += idxr.strideColNode())
-	//{
-	//	const ColumnPosition colPos{(0.5 + static_cast<double>(col)) / static_cast<double>(_disc.nPoints), 0.0, 0.0};
-	//	_dynReactionBulk->residualLiquidAdd(t, secIdx, colPos, y, res, -1.0, tlmAlloc);
-
-	//	if (wantJac)
-	//	{
-	//		// static_cast should be sufficient here, but this statement is also analyzed when wantJac = false
-	//		_dynReactionBulk->analyticJacobianLiquidAdd(t, secIdx, colPos, reinterpret_cast<double const*>(y), -1.0, _convDispOp.jacobian().row(col * idxr.strideColNode()), tlmAlloc);
-	//	}
-	//}
+			if (wantJac)
+			{
+				linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, col * idxr.strideColNode());
+				// static_cast should be sufficient here, but this statement is also analyzed when wantJac = false
+				_dynReactionBulk->analyticJacobianLiquidAdd(t, secIdx, colPos, reinterpret_cast<double const*>(y), -1.0, jac, tlmAlloc);
+			}
+		}
+	}
 
 	return 0;
 }

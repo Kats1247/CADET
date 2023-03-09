@@ -1587,11 +1587,19 @@ protected:
 	/**
 	* @brief computes the jacobian via finite differences (testing purpose)
 	*/
-	MatrixXd calcFDJacobian(const SimulationTime simTime, util::ThreadLocalStorage& threadLocalMem, double alpha) {
+	MatrixXd calcFDJacobian(const double* y_, const double* yDot_, const SimulationTime simTime, util::ThreadLocalStorage& threadLocalMem, double alpha) {
 
 		// create solution vectors
-		VectorXd y = VectorXd::Zero(numDofs());
-		VectorXd yDot = VectorXd::Zero(numDofs());
+		Eigen::Map<const VectorXd> hmpf(y_, numDofs());
+		VectorXd y = hmpf;
+		VectorXd yDot;
+		if (yDot_) {
+			Eigen::Map<const VectorXd> hmpf2(yDot_, numDofs());
+			yDot = hmpf2;
+		}
+		else {
+			return MatrixXd::Zero(numDofs(), numDofs());
+		}
 		VectorXd res = VectorXd::Zero(numDofs());
 		const double* yPtr = &y[0];
 		const double* yDotPtr = &yDot[0];
@@ -3563,13 +3571,16 @@ protected:
 	}
 
 
-	void setJacobianPattern_GRM(SparseMatrix<double, RowMajor>& globalJ, unsigned int secIdx) {
+	void setJacobianPattern_GRM(SparseMatrix<double, RowMajor>& globalJ, unsigned int secIdx, bool hasBulkReaction) {
 
 		Indexer idxr(_disc);
 
 		std::vector<T> tripletList;
 		// reserve space for all entries
 		int bulkEntries = nConvDispEntries();
+		if (hasBulkReaction)
+			bulkEntries += _disc.nPoints * _disc.nComp * _disc.nComp; // add nComp entries for every component at each discrete bulk point
+
 		// particle
 		int addTimeDer = 0; // additional time derivative entries: bound states in particle dispersion equation
 		int isothermNNZ = 0;
@@ -3587,8 +3598,21 @@ protected:
 		// NOTE: inlet and jacF flux jacobian are set in calc jacobian function (identity matrices)
 		// Note: flux jacobian (identity matrix) is handled in calc jacobian function
 
-		// bulk jacobian
+		// convection dispersion bulk jacobian
 		setConvDispJacPattern(tripletList);
+
+		// bulk reaction jacobian
+		if (hasBulkReaction) {
+			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++) {
+				for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+					for (unsigned int toComp = 0; toComp < _disc.nComp; toComp++) {
+						tripletList.push_back(T(idxr.offsetC() + colNode * idxr.strideColNode() + comp * idxr.strideColComp(),
+							idxr.offsetC() + colNode * idxr.strideColNode() + toComp * idxr.strideColComp(),
+							0.0));
+					}
+				}
+			}
+		}
 
 		// particle jacobian (including isotherm and time derivative)
 		for (int colNode = 0; colNode < _disc.nPoints; colNode++) {
@@ -3649,7 +3673,7 @@ protected:
 			linalg::BandedEigenSparseRowIterator jacCl(_globalJac, idxr.offsetC());
 			linalg::BandedEigenSparseRowIterator jacCp(_globalJac, idxr.offsetCp(ParticleTypeIndex{ type }) + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type));
 
-			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++, jacCp += _disc.strideBound[type] + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type))
+			for (unsigned int colNode = 0; colNode < _disc.nPoints; colNode++)
 			{
 				for (unsigned int comp = 0; comp < _disc.nComp; comp++, ++jacCp, ++jacCl) {
 					// add Cl on Cl entries (added since these entries are also touched by bulk jacobian)
@@ -3680,18 +3704,18 @@ protected:
 							// row: already at particle. Already at current node and liquid state.
 							// col: original entry at outer node.
 							jacCp[entry - jacCp.row()]
-								// note: _disc.Ir[type][_disc.nParNode[type] - 1] is lifting matrix contribution
 							+= static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 							// row: already at particle. Already at current node and liquid state.
 							// col: go to current bulk phase.
 							jacCp[jacCl.row() - jacCp.row()]
-								// note: _disc.Ir[type][_disc.nParNode[type] - 1] is lifting matrix contribution
 								= -static_cast<double>(filmDiff[comp]) * 2.0 / _disc.deltaR[_disc.offsetMetric[type]] * _disc.parInvMM[_disc.offsetMetric[type] + _disc.nParCell[type] - 1](node, _disc.nParNode[type] - 1) * exIntLiftContribution / static_cast<double>(_parPorosity[type]) / static_cast<double>(_poreAccessFactor[type * _disc.nComp + comp]);
 						}
 						// set back iterator to first node as required by component loop
 						jacCp += _disc.nParNode[type] * idxr.strideParNode(type);
 					}
 				}
+				if (colNode < _disc.nPoints - 1) // execute iteration statement only when condition is true in next loop.
+					jacCp += _disc.strideBound[type] + (_disc.nParPoints[type] - 1) * idxr.strideParNode(type);
 			}
 		}
 

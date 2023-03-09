@@ -1824,7 +1824,7 @@ void LumpedRateModelWithPoresDG::consistentInitialState(const SimulationTime& si
 	}
 
 	// reset jacobian pattern //@todo can this be avoided?
-	setGlobalJacPattern(_globalJacDisc);
+	setGlobalJacPattern(_globalJacDisc, _dynReactionBulk);
 }
 
 /**
@@ -1959,7 +1959,6 @@ void LumpedRateModelWithPoresDG::consistentInitialTimeDerivative(const Simulatio
 #ifdef CADET_PARALLELIZE
 	BENCH_STOP(_timerConsistentInitPar);
 #endif
-
 
 	// Factorize
 	_globalSolver.factorize(_globalJacDisc);

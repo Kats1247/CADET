@@ -1114,16 +1114,19 @@ protected:
 	/**
 	* @brief sets the sparsity pattern of the convection dispersion Jacobian
 	*/
-	void setGlobalJacPattern(Eigen::SparseMatrix<double, RowMajor>& mat) {
+	void setGlobalJacPattern(Eigen::SparseMatrix<double, RowMajor>& mat, const bool hasBulkReaction) {
 
 		std::vector<T> tripletList;
 
-		tripletList.reserve(nConvDispEntries());
+		tripletList.reserve(nJacEntries(hasBulkReaction));
 
 		if (_disc.exactInt)
 			ConvDispModalPattern(tripletList);
 		else
 			ConvDispNodalPattern(tripletList);
+
+		if (hasBulkReaction)
+			bulkReactionPattern(tripletList);
 
 		particlePattern(tripletList);
 
@@ -1132,7 +1135,24 @@ protected:
 		mat.setFromTriplets(tripletList.begin(), tripletList.end());
 
 	}
+	/**
+	 * @brief sets the sparsity pattern of the bulkreaction  Jacobian pattern
+	 */
+	int bulkReactionPattern(std::vector<T>& tripletList) {
 
+		Indexer idxr(_disc);
+
+		for (unsigned int blk = 0; blk < _disc.nPoints; blk++) {
+			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+				for (unsigned int toComp = 0; toComp < _disc.nComp; toComp++) {
+					tripletList.push_back(T(idxr.offsetC() + blk * idxr.strideColNode() + comp * idxr.strideColComp(),
+						idxr.offsetC() + blk * idxr.strideColNode() + toComp * idxr.strideColComp(),
+						0.0));
+				}
+			}
+		}
+		return 1;
+	}
 	/**
 	 * @brief sets the sparsity pattern of the particle Jacobian pattern (isotherm, reaction pattern)
 	 */
@@ -1538,22 +1558,34 @@ protected:
 	 * @brief calculates the number of entris for the DG convection dispersion jacobian
 	 * @note only dispersion entries are relevant for jacobian NNZ as the convection entries are a subset of these
 	 */
-	unsigned int nConvDispEntries(bool pureNNZ = false) {
+	unsigned int nJacEntries(const bool hasBulkReaction, const bool pureNNZ = false) {
 
+		unsigned int nEntries = 0;
+		// Convection dispersion
 		if (_disc.exactInt) {
-			if (pureNNZ) {
-				return _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
-			}
-			return _disc.nComp * _disc.nNodes * _disc.nNodes + _disc.nNodes // convection entries
-				+ _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
+			if (pureNNZ)
+				nEntries = _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
+			else
+				nEntries = _disc.nComp * _disc.nNodes * _disc.nNodes + _disc.nNodes // convection entries
+					+ _disc.nComp * ((3u * _disc.nCol - 2u) * _disc.nNodes * _disc.nNodes + (2u * _disc.nCol - 3u) * _disc.nNodes); // dispersion entries
 		}
 		else {
-			if (pureNNZ) {
-				return _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
-			}
-			return _disc.nComp * _disc.nNodes * _disc.nNodes + 1u // convection entries
-				+ _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
+			if (pureNNZ)
+				nEntries = _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
+			else
+				nEntries = _disc.nComp * _disc.nNodes * _disc.nNodes + 1u // convection entries
+					+ _disc.nComp * (_disc.nCol * _disc.nNodes * _disc.nNodes + 8u * _disc.nNodes); // dispersion entries
 		}
+
+		// Bulk reaction entries
+		if (hasBulkReaction)
+			nEntries += _disc.nPoints * _disc.nComp * _disc.nComp; // add nComp entries for every component at each discrete bulk point
+
+		// Particle binding and reaction entries
+		for (unsigned int type = 0; type < _disc.nParType; type++)
+			nEntries += _disc.nComp + _disc.nBoundBeforeType[type];
+
+		return nEntries;
 	}
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
