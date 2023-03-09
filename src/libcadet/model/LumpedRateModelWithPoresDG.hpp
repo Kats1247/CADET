@@ -513,17 +513,32 @@ protected:
 		 */
 		MatrixXd DGjacobianConvBlock() {
 
-			// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
+			// Convection block [ d RHS_conv / d c ], additionally depends on upwind flux part from corresponding neighbour cell
 			MatrixXd convBlock = MatrixXd::Zero(nNodes, nNodes + 1);
-			convBlock.block(0, 1, nNodes, nNodes) -= polyDerM;
 
-			if (exactInt) {
-				convBlock.block(0, 0, nNodes, 1) += invMM.block(0, 0, nNodes, 1);
-				convBlock.block(0, 1, nNodes, 1) -= invMM.block(0, 0, nNodes, 1);
+			if (velocity >= 0.0) { // forward flow -> Convection block additionally depends on last entry of previous cell
+				convBlock.block(0, 1, nNodes, nNodes) -= polyDerM;
+
+				if (exactInt) {
+					convBlock.block(0, 0, nNodes, 1) += invMM.block(0, 0, nNodes, 1);
+					convBlock.block(0, 1, nNodes, 1) -= invMM.block(0, 0, nNodes, 1);
+				}
+				else {
+					convBlock(0, 0) += invWeights[0];
+					convBlock(0, 1) -= invWeights[0];
+				}
 			}
-			else {
-				convBlock(0, 0) += invWeights[0];
-				convBlock(0, 1) -= invWeights[0];
+			else { // backward flow -> Convection block additionally depends on first entry of subsequent cell
+				convBlock.block(0, 0, nNodes, nNodes) -= polyDerM;
+
+				if (exactInt) {
+					convBlock.block(0, nNodes - 1, nNodes, 1) += invMM.block(0, nNodes - 1, nNodes, 1);
+					convBlock.block(0, nNodes, nNodes, 1) -= invMM.block(0, nNodes - 1, nNodes, 1);
+				}
+				else {
+					convBlock(nNodes - 1, nNodes - 1) += invWeights[nNodes - 1];
+					convBlock(nNodes - 1, nNodes) -= invWeights[nNodes - 1];
+				}
 			}
 			convBlock *= 2 / deltaZ;
 
@@ -931,7 +946,6 @@ protected:
 				-= _disc.polyDerM * state.segment(Cell * _disc.nNodes, _disc.nNodes);
 		}
 	}
-
 	/*
 	* @brief calculates the interface fluxes h* of Convection Dispersion equation
 	*/
@@ -943,27 +957,49 @@ protected:
 
 		// Conv.Disp. flux: h* = h*_conv + h*_disp = numFlux(v c_l, v c_r) + 0.5 sqrt(D_ax) (S_l + S_r)
 
+		if (_disc.velocity >= 0.0) { // forward flow (upwind num. flux)
 		// calculate inner interface fluxes
-		for (unsigned int Cell = 1; Cell < _disc.nCol; Cell++) {
-			// h* = h*_conv + h*_disp
-			_disc.surfaceFlux[Cell] // inner interfaces
-				= _disc.velocity * (C[Cell * strideCell - strideNode])
-				- 0.5 * std::sqrt(_disc.dispersion[comp]) * (g[Cell * strideCell - strideNode] // left cell
-					+ g[Cell * strideCell]);
+			for (unsigned int Cell = 1; Cell < _disc.nCol; Cell++) {
+				// h* = h*_conv + h*_disp
+				_disc.surfaceFlux[Cell] // inner interfaces
+					= _disc.velocity * (C[Cell * strideCell - strideNode]) // left cell (i.e. forward flow upwind)
+					- 0.5 * std::sqrt(_disc.dispersion[comp]) * (g[Cell * strideCell - strideNode] // left cell
+						+ g[Cell * strideCell]); // right cell
+			}
+
+			// boundary fluxes
+			// inlet (left) boundary interface
+			_disc.surfaceFlux[0]
+				= _disc.velocity * _disc.boundary[0];
+
+			// outlet (right) boundary interface
+			_disc.surfaceFlux[_disc.nCol]
+				= _disc.velocity * (C[_disc.nCol * strideCell - strideNode])
+				- std::sqrt(_disc.dispersion[comp]) * 0.5 * (g[_disc.nCol * strideCell - strideNode] // last cell last node
+					+ _disc.boundary[3]); // right boundary value S
 		}
+		else { // backward flow (upwind num. flux)
+			// calculate inner interface fluxes
+			for (unsigned int Cell = 1; Cell < _disc.nCol; Cell++) {
+				// h* = h*_conv + h*_disp
+				_disc.surfaceFlux[Cell] // inner interfaces
+					= _disc.velocity * (C[Cell * strideCell]) // right cell (i.e. backward flow upwind)
+					- 0.5 * std::sqrt(_disc.dispersion[comp]) * (g[Cell * strideCell - strideNode] // left cell
+						+ g[Cell * strideCell]); // right cell
+			}
 
-		// boundary fluxes
-			// left boundary interface
-		_disc.surfaceFlux[0]
-			= _disc.velocity * _disc.boundary[0];
+			// boundary fluxes
+			// inlet boundary interface
+			_disc.surfaceFlux[_disc.nCol]
+				= _disc.velocity * _disc.boundary[0];
 
-		// right boundary interface
-		_disc.surfaceFlux[_disc.nCol]
-			= _disc.velocity * (C[_disc.nCol * strideCell - strideNode])
-			- std::sqrt(_disc.dispersion[comp]) * 0.5 * (g[_disc.nCol * strideCell - strideNode] // last cell last node
-				+ _disc.boundary[3]); // right boundary value S
+			// outlet boundary interface
+			_disc.surfaceFlux[0]
+				= _disc.velocity * (C[0])
+				- std::sqrt(_disc.dispersion[comp]) * 0.5 * (g[0] // first cell first node
+					+ _disc.boundary[2]); // left boundary value g
+		}
 	}
-
 	/**
 	* @brief calculates and fills the surface flux values for auxiliary equation
 	*/
@@ -1093,16 +1129,15 @@ protected:
 		applyMapping(resC); // inverse mapping to reference space
 
 	}
-
 	/**
 	* @brief computes ghost nodes used to implement Danckwerts boundary conditions
 	*/
 	void calcBoundaryValues(Eigen::Map<const VectorXd, 0, InnerStride<>>& C) {
 
 		//cache.boundary[0] = c_in -> inlet DOF idas suggestion
-		_disc.boundary[1] = C[_disc.nPoints - 1]; // c_r outlet
-		_disc.boundary[2] = -_disc.g[0]; // S_l inlet
-		_disc.boundary[3] = -_disc.g[_disc.nPoints - 1]; // g_r outlet
+		//_disc.boundary[1] = (_disc.velocity >= 0.0) ? C[_disc.nPoints - 1] : C[0]; // c_r outlet not required
+		_disc.boundary[2] = -_disc.g[0]; // g_l left boundary (inlet/outlet for forward/backward flow)
+		_disc.boundary[3] = -_disc.g[_disc.nPoints - 1]; // g_r right boundary (outlet/inlet for forward/backward flow)
 	}
 
 	// ==========================================================================================================================================================  //
@@ -1200,7 +1235,6 @@ protected:
 		}
 		return 1;
 	}
-
 	/**
 	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the nodal DG scheme
 	*/
@@ -1222,33 +1256,60 @@ protected:
 		/*			Define Convection Jacobian Block			*/
 		/*======================================================*/
 
-		// Convection block [ d RHS_conv / d c ], also depends on first entry of previous cell
+		// Convection block [ d RHS_conv / d c ], also depends on upwind entry
 
-		// special inlet DOF treatment for first cell
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < nNodes; i++) {
-				//tripletList.push_back(T(offC + comp * sComp + i * sNode, comp * sComp, 0.0)); // inlet DOFs not included in Jacobian
-				for (unsigned int j = 1; j < nNodes + 1; j++) {
-					tripletList.push_back(T(offC + comp * sComp + i * sNode,
-						offC + comp * sComp + (j - 1) * sNode,
-						0.0));
-				}
-			}
-		}
-		for (unsigned int cell = 1; cell < nCells; cell++) {
+		if (_disc.velocity >= 0.0) { // forward flow upwind entry -> last node of previous cell
+		// special inlet DOF treatment for inlet boundary cell (first cell)
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < nNodes; i++) {
-					for (unsigned int j = 0; j < nNodes + 1; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
-						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
-							offC + cell * sCell - sNode + comp * sComp + j * sNode,
+					//tripletList.push_back(T(offC + comp * sComp + i * sNode, comp * sComp, 0.0)); // inlet DOFs not included in Jacobian
+					for (unsigned int j = 1; j < nNodes + 1; j++) {
+						tripletList.push_back(T(offC + comp * sComp + i * sNode,
+							offC + comp * sComp + (j - 1) * sNode,
 							0.0));
 					}
 				}
 			}
+			for (unsigned int cell = 1; cell < nCells; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < nNodes; i++) {
+						for (unsigned int j = 0; j < nNodes + 1; j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
+							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + cell * sCell - sNode + comp * sComp + j * sNode,
+								0.0));
+						}
+					}
+				}
+			}
 		}
-
+		else { // backward flow upwind entry -> first node of subsequent cell
+			// special inlet DOF treatment for inlet boundary cell (last cell)
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < nNodes; i++) {
+					// inlet DOFs not included in Jacobian
+					for (unsigned int j = 0; j < nNodes; j++) {
+						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+							offC + (nCells - 1) * sCell + comp * sComp + j * sNode,
+							0.0));
+					}
+				}
+			}
+			for (unsigned int cell = 0; cell < nCells - 1u; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < nNodes; i++) {
+						for (unsigned int j = 0; j < nNodes + 1; j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							// col: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + cell * sCell + comp * sComp + j * sNode,
+								0.0));
+						}
+					}
+				}
+			}
+		}
 		/*======================================================*/
 		/*			Define Dispersion Jacobian Block			*/
 		/*======================================================*/
@@ -1334,32 +1395,59 @@ protected:
 		/*			Define Convection Jacobian Block			*/
 		/*======================================================*/
 
-		// Convection block [ d RHS_conv / d c ], additionally depends on first entry of previous cell
-		// special inlet DOF treatment for first cell
-		for (unsigned int comp = 0; comp < nComp; comp++) {
-			for (unsigned int i = 0; i < nNodes; i++) {
-				//tripletList.push_back(T(offC + comp * sComp + i * sNode, comp * sComp, 0.0)); // inlet DOFs not included in Jacobian
-				for (unsigned int j = 1; j < nNodes + 1; j++) {
-					tripletList.push_back(T(offC + comp * sComp + i * sNode,
-											offC + comp * sComp + (j - 1) * sNode,
-											0.0));
-				}
-			}
-		}
-		for (unsigned int cell = 1; cell < nCells; cell++) {
+		// Convection block [ d RHS_conv / d c ], also depends on upwind entry
+
+		if (_disc.velocity >= 0.0) { // forward flow upwind entry -> last node of previous cell
 			for (unsigned int comp = 0; comp < nComp; comp++) {
 				for (unsigned int i = 0; i < nNodes; i++) {
-					for (unsigned int j = 0; j < nNodes + 1; j++) {
-						// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
-						// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
-						tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
-												offC + cell * sCell - sNode + comp * sComp + j * sNode,
-												0.0));
+					//tripletList.push_back(T(offC + comp * sComp + i * sNode, comp * sComp, 0.0)); // inlet DOFs not included in Jacobian
+					for (unsigned int j = 1; j < nNodes + 1; j++) {
+						tripletList.push_back(T(offC + comp * sComp + i * sNode,
+							offC + comp * sComp + (j - 1) * sNode,
+							0.0));
+					}
+				}
+			}
+			for (unsigned int cell = 1; cell < nCells; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < nNodes; i++) {
+						for (unsigned int j = 0; j < nNodes + 1; j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							// col: jump over inlet DOFs and previous cells, go back one node, add component offset and go node strides from there for each convection block entry
+							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + cell * sCell - sNode + comp * sComp + j * sNode,
+								0.0));
+						}
 					}
 				}
 			}
 		}
-
+		else { // backward flow upwind entry -> first node of subsequent cell
+			// special inlet DOF treatment for inlet boundary cell (last cell)
+			for (unsigned int comp = 0; comp < nComp; comp++) {
+				for (unsigned int i = 0; i < nNodes; i++) {
+					// inlet DOFs not included in Jacobian
+					for (unsigned int j = 0; j < nNodes; j++) {
+						tripletList.push_back(T(offC + (nCells - 1) * sCell + comp * sComp + i * sNode,
+							offC + (nCells - 1) * sCell + comp * sComp + j * sNode,
+							0.0));
+					}
+				}
+			}
+			for (unsigned int cell = 0; cell < nCells - 1u; cell++) {
+				for (unsigned int comp = 0; comp < nComp; comp++) {
+					for (unsigned int i = 0; i < nNodes; i++) {
+						for (unsigned int j = 0; j < nNodes + 1; j++) {
+							// row: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							// col: jump over inlet DOFs and previous cells, add component offset and go node strides from there for each convection block entry
+							tripletList.push_back(T(offC + cell * sCell + comp * sComp + i * sNode,
+								offC + cell * sCell + comp * sComp + j * sNode,
+								0.0));
+						}
+					}
+				}
+			}
+		}
 		/*======================================================*/
 		/*			Define Dispersion Jacobian Block			*/
 		/*======================================================*/
@@ -1690,29 +1778,53 @@ protected:
 		MatrixXd convBlock = _disc.DGjacAxConvBlock;
 		linalg::BandedEigenSparseRowIterator jacIt(_globalJac, offC); // row iterator starting at first cell and component
 
-		// special inlet DOF treatment for first cell
-		_jacInlet(0, 0) = _disc.velocity * convBlock(0, 0); // only first node depends on inlet concentration
-		for (unsigned int i = 0; i < convBlock.rows(); i++) {
-			for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
-				//jacIt[0] = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
-				for (unsigned int j = 1; j < convBlock.cols(); j++) {
-					jacIt[((j - 1) - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
-				}
-			}
-		}
-		// remaining cells
-		for (unsigned int cell = 1; cell < nCells; cell++) {
+		if (_disc.velocity >= 0.0) { // forward flow upwind convection
+			// special inlet DOF treatment for first cell (inlet boundary cell)
+			_jacInlet(0, 0) = _disc.velocity * convBlock(0, 0); // only first node depends on inlet concentration
 			for (unsigned int i = 0; i < convBlock.rows(); i++) {
 				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
-					for (unsigned int j = 0; j < convBlock.cols(); j++) {
-						// row: iterator is at current cell and component
-						// col: start at previous cells last node and go to node j.
-						jacIt[-idxr.strideColNode() + (j - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
+					//jacIt[0] = -convBlock(i, 0); // dependency on inlet DOFs is handled in _jacInlet
+					for (unsigned int j = 1; j < convBlock.cols(); j++) {
+						jacIt[((j - 1) - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
+					}
+				}
+			}
+			// remaining cells
+			for (unsigned int cell = 1; cell < nCells; cell++) {
+				for (unsigned int i = 0; i < convBlock.rows(); i++) {
+					for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
+						for (unsigned int j = 0; j < convBlock.cols(); j++) {
+							// row: iterator is at current cell and component
+							// col: start at previous cells last node and go to node j.
+							jacIt[-idxr.strideColNode() + (j - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
+						}
 					}
 				}
 			}
 		}
-
+		else { // backward flow upwind convection
+			// non-inlet cells
+			for (unsigned int cell = 0; cell < nCells - 1u; cell++) {
+				for (unsigned int i = 0; i < convBlock.rows(); i++) {
+					for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
+						for (unsigned int j = 0; j < convBlock.cols(); j++) {
+							// row: iterator is at current cell and component
+							// col: start at current cells first node and go to node j.
+							jacIt[(j - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
+						}
+					}
+				}
+			}
+			// special inlet DOF treatment for last cell (inlet boundary cell)
+			_jacInlet(0, 0) = _disc.velocity * convBlock(convBlock.rows() - 1, convBlock.cols() - 1); // only last node depends on inlet concentration
+			for (unsigned int i = 0; i < convBlock.rows(); i++) {
+				for (unsigned int comp = 0; comp < nComp; comp++, ++jacIt) {
+					for (unsigned int j = 0; j < convBlock.cols() - 1; j++) {
+						jacIt[(j - i) * idxr.strideColNode()] += _disc.velocity * convBlock(i, j);
+					}
+				}
+			}
+		}
 		return 0;
 	}
 	/**
@@ -1833,11 +1945,22 @@ protected:
 		int sCell = idxr.strideColCell();
 
 		linalg::BandedEigenSparseRowIterator jac(_globalJac, offC);
-		// special inlet DOF treatment for first cell
-		_jacInlet = _disc.velocity * _disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
-		addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock.block(0, 1, nNodes, nNodes), jac, 0, idxr, 1);
-		if (_disc.nCol > 1) // iterator already moved to second cell
-			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, -idxr.strideColNode(), idxr, _disc.nCol - 1);
+
+		if (_disc.velocity >= 0.0) { // Forward flow
+		// special inlet DOF treatment for inlet (first) cell
+			_jacInlet = _disc.velocity * _disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
+			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock.block(0, 1, nNodes, nNodes), jac, 0, idxr, 1);
+			if (_disc.nCol > 1) // iterator already moved to second cell
+				addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, -idxr.strideColNode(), idxr, _disc.nCol - 1);
+		}
+		else { // Backward flow
+			// non-inlet cells first
+			if (_disc.nCol > 1)
+				addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock, jac, 0, idxr, _disc.nCol - 1);
+			// special inlet DOF treatment for inlet (last) cell. Iterator already moved to last cell
+			_jacInlet = _disc.velocity * _disc.DGjacAxConvBlock.col(_disc.DGjacAxConvBlock.cols() - 1); // only last cell depends on inlet concentration
+			addLiquidJacBlock(_disc.velocity * _disc.DGjacAxConvBlock.block(0, 0, nNodes, nNodes), jac, 0, idxr, 1);
+		}
 
 		return 0;
 	}

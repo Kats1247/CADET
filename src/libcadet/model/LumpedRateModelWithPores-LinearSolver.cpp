@@ -622,6 +622,11 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	} // if (_factorizeJacobian)
 
 	//if (_globalJacDisc.toDense().isApprox(_FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()), 1e-12)) {
+	//	//std::cout << "ana. inlet:\n" << std::fixed << std::setprecision(3) << _jacInlet << std::endl;
+	//	//std::cout << "FD inlet:\n" << _FDjac.block(0, 0, _disc.nComp + idxr.strideColCell(), _disc.nComp) << std::endl;
+	//	//std::cout << "ana. Jac:\n" << _globalJacDisc.toDense() << std::endl;
+	//	//std::cout << "FD Jac:\n" << _FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()) << std::endl;
+	//	//std::cout << "vgl Jac:\n" << _FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()) - _globalJacDisc.toDense() << std::endl;
 	//	std::cout << "jacobian correct" << std::endl;
 	//}
 	//else {
@@ -629,6 +634,7 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 	//	std::cout << "FD inlet:\n" << _FDjac.block(0, 0, _disc.nComp + idxr.strideColCell(), _disc.nComp) << std::endl;
 	//	std::cout << "ana. Jac:\n" << _globalJacDisc.toDense() << std::endl;
 	//	std::cout << "FD Jac:\n" << _FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()) << std::endl;
+	//	std::cout << "vgl Jac:\n" << _FDjac.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()) - _globalJacDisc.toDense()  << std::endl;
 	//	std::cout << "jacobian incorrect" << std::endl;
 	//}
 
@@ -636,10 +642,13 @@ int LumpedRateModelWithPoresDG::linearSolve(double t, double alpha, double outer
 
 	// rhs is passed twice but due to the values in jacA the writes happen to a different area of the rhs than the reads.
 
-	// handle inlet DOFs
+	// Handle inlet DOFs:
+	// Inlet at z = 0 for forward flow, at z = L for backward flow.
+	unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+
 	for (int comp = 0; comp < _disc.nComp; comp++) {
 		for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
-			r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
+			r[idxr.offsetC() + offInlet + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 		}
 	}
 

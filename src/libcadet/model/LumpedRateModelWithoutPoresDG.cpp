@@ -862,11 +862,11 @@ namespace cadet
 			assembleDiscretizedJacobian(alpha, idxr);
 
 			//////// todo delete debug code jacobian
-			////std::cout /*<< std::fixed*/ << std::setprecision(1) << "FD jac:" << std::endl;
-			////std::cout << FDjac.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs()) << std::endl;
-			////std::cout << "analytical jac:" << std::endl;
+			//std::cout << std::fixed << std::setprecision(2) << "FD jac:" << std::endl;
+			//std::cout << FDjac.block(_disc.nComp, _disc.nComp, numPureDofs(), numPureDofs()) << std::endl;
+			//std::cout << "analytical jac:" << std::endl;
 			//std::cout << _jacDisc.toDense() << std::endl;
-			//std::cout << _jac.toDense() << std::endl;
+			//////std::cout << _jac.toDense() << std::endl;
 
 			//double maxDiff = 0.0;
 			//int maxDiffRow = -1;
@@ -893,14 +893,16 @@ namespace cadet
 			//	}
 			//}
 			//std::cout << "ANA == FD: " << equal << std::endl;
-			//std::cout << "Max Diff: " << maxDiff << " at row; col: " << maxDiffRow << "; " << maxDiffCol << std::endl;
+			//std::cout << "Max Diff: " << std::setprecision(12) << maxDiff << " at row; col: " << std::setprecision(2) << maxDiffRow << "; " << maxDiffCol << std::endl;
 			////std::cout << "deviation pattern:\n" << std::scientific << std::setprecision(0) << diffpattern.block(0, 0, numPureDofs(), numPureDofs()) << std::endl;
 
-			////std::cout << "inlet analytical: " << std::endl;
-			////std::cout << _jacInlet << std::endl;
-			////std::cout << "inlet FDjac: " << std::endl;
-			////std::cout << FDjac.block(_disc.nComp, 0, _disc.nNodes * idxr.strideColNode(), _disc.nComp) << std::endl;
-			
+			//std::cout << "inlet analytical: " << std::endl;
+			//std::cout << _jacInlet << std::endl;
+			//std::cout << "inlet FDjac: " << std::endl;
+			//if(_disc.velocity < 0.0)
+			//	std::cout << FDjac.block(numDofs() - _disc.nNodes * idxr.strideColNode() - 1, 0, _disc.nNodes * idxr.strideColNode(), _disc.nComp) << std::endl;
+			//else
+			//	std::cout << FDjac.block(_disc.nComp, 0, _disc.nNodes * idxr.strideColNode(), _disc.nComp) << std::endl;
 
 			// solve J x = rhs
 			Eigen::Map<VectorXd> r(rhs, numDofs());
@@ -924,10 +926,13 @@ namespace cadet
 				result = false;
 			}
 
-			// handle inlet DOFs
+			// Handle inlet DOFs:
+			// Inlet at z = 0 for forward flow, at z = L for backward flow.
+			unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 				for (unsigned int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
-					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
+					r[idxr.offsetC() + offInlet + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
 				}
 			}
 
