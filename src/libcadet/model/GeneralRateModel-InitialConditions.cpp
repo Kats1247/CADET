@@ -1656,12 +1656,12 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 		const linalg::ConstMaskArray mask{ qsMask.data(), static_cast<int>(_disc.nComp + _disc.strideBound[type]) };
 		const int probSize = linalg::numMaskActive(mask);
 
-#ifdef CADET_PARALLELIZE
-		BENCH_SCOPE(_timerConsistentInitPar);
-		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t pblk)
-#else
+//#ifdef CADET_PARALLELIZE
+//		BENCH_SCOPE(_timerConsistentInitPar);
+//		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t pblk)
+//#else
 		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-#endif
+//#endif
 		{
 			LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
@@ -1696,7 +1696,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 
 			// This loop cannot be run in parallel without creating a Jacobian matrix for each thread which would increase memory usage
 			const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
-			for (std::size_t node = 0; node < static_cast<std::size_t>(_disc.nParPoints[type]); ++node)
+			for (unsigned int node = 0; node < _disc.nParPoints[type]; ++node)
 			{
 				const int localOffsetInParticle = static_cast<int>(node) * idxr.strideParNode(type);
 
@@ -1906,7 +1906,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			// reset jacobian pattern
 			setJacobianPattern_GRM(_globalJacDisc, _disc.curSection, _dynReactionBulk);
 
-		} CADET_PARFOR_END;
+		} //CADET_PARFOR_END;
 	}
 
 }
