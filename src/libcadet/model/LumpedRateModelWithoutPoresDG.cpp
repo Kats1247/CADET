@@ -153,7 +153,7 @@ namespace cadet
 
 			const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, _disc.nComp, _disc.nCol, strideCell);
 
-			_disc.dispersion = Eigen::VectorXd::Zero(_disc.nComp); // fill later on with convDispOp (section and component dependent)
+			_disc.dispersion = new active[_disc.nComp]; // fill later on with convDispOp (section and component dependent)
 
 			_disc.velocity = static_cast<double>(_convDispOp.currentVelocity()); // updated later on with convDispOp (section dependent)
 			_disc.curSection = -1;
@@ -238,7 +238,6 @@ namespace cadet
 
 			// Read geometry parameters
 			_totalPorosity = paramProvider.getDouble("TOTAL_POROSITY");
-			_disc.porosity = paramProvider.getDouble("TOTAL_POROSITY");
 
 			// Add parameters to map
 			_parameters[makeParamId(hashString("TOTAL_POROSITY"), _unitOpIdx, CompIndep, ParTypeIndep, BoundStateIndep, ReactionIndep, SectionIndep)] = &_totalPorosity;
@@ -592,11 +591,6 @@ namespace cadet
 		{
 			Indexer idxr(_disc);
 
-			// Eigen access to data pointers
-			const double* yPtr = reinterpret_cast<const double*>(y_);
-			const double* const ypPtr = reinterpret_cast<const double* const>(yDot_);
-			double* const resPtr = reinterpret_cast<double* const>(res_);
-
 			bool success = 1;
 
 			// determine wether we have a section switch. If so, set velocity, dispersion, newStaticJac
@@ -608,7 +602,7 @@ namespace cadet
 					// TODO: reset pattern every time section?
 					//setPattern(_jacDisc, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
 					//setPattern(_jac, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
-					success = calcStaticAnaJacobian(t, secIdx, yPtr, threadLocalMem);
+					success = calcStaticAnaJacobian();
 
 					_disc.newStaticJac = false;
 				}
@@ -647,7 +641,7 @@ namespace cadet
 				};
 
 				// position of current column node (z coordinate) - needed in externally dependent adsorption kinetic
-				double z = _disc.deltaZ * std::floor(blk / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[blk % _disc.nNodes]);
+				double z = static_cast<double>(_disc.deltaZ) * std::floor(blk / _disc.nNodes) + 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[blk % _disc.nNodes]);
 
 				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, false>(
 					t, secIdx, ColumnPosition{ z, 0.0, 0.0 }, localY, localYdot, localRes, jacIt, cellResParams, threadLocalMem.get()
@@ -661,27 +655,35 @@ namespace cadet
 
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 
-				// extract current component mobile phase, mobile phase residual, mobile phase derivative (discontinous memory blocks)
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> C_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-				Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		cRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-				Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
 				/*	convection dispersion RHS	*/
 
-				_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
-				ConvDisp_DG(C_comp, cRes_comp, t, comp);
+				_disc.boundary[0] = y_[comp]; // copy inlet DOFs to ghost node
+
+				ConvDisp_DG<StateType, ResidualType, ParamType>(y_, res_, t, comp);
 
 				/*	residual	*/
 
 				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
 
-				if (ypPtr) { // NULLpointer for consistent initialization
-					if (_disc.nBound[comp]) { // either one or null
-						Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(ypPtr + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-						cRes_comp = cDot_comp + qDot_comp * ((1 - _disc.porosity) / _disc.porosity) - cRes_comp;
+				// Eigen access to current component mobile phase (discontinuous memory blocks)
+				Eigen::Map<Vector<ResidualType, Eigen::Dynamic>, 0, InnerStride<Dynamic>> cRes_comp(res_ + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+
+				if (yDot_) { // NULLpointer for consistent initialization
+
+					Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(yDot_ + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+					if (_disc.nBound[comp]) {
+						Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(yDot_ + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
+
+						if constexpr (std::is_same_v<ResidualType, double>)
+							cRes_comp = cDot_comp + qDot_comp * ((1 - static_cast<double>(_totalPorosity)) / static_cast<double>(_totalPorosity)) - cRes_comp;
+						else
+							cRes_comp = cDot_comp.cast<ResidualType>() + qDot_comp.cast<ResidualType>() * ((1 - static_cast<ParamType>(_totalPorosity)) / static_cast<ParamType>(_totalPorosity)) - cRes_comp;
 					}
 					else
-						cRes_comp = cDot_comp - cRes_comp;
+						if constexpr (std::is_same_v<ResidualType, double>)
+							cRes_comp = cDot_comp - cRes_comp;
+						else
+							cRes_comp = cDot_comp.cast<ResidualType>() - cRes_comp;
 				}
 				else
 					cRes_comp *= -1.0;
@@ -1158,8 +1160,8 @@ namespace cadet
 				linalg::DenseMatrixView fullJacobianMatrix(_jacDisc.valuePtr() + point * _disc.strideBound * _disc.strideBound, nullptr, mask.len, mask.len);
 
 				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-				const double z = (_disc.deltaZ * std::floor(point / _disc.nNodes)
-					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[point % _disc.nNodes])) / _disc.length_;
+				const double z = (static_cast<double>(_disc.deltaZ) * std::floor(point / _disc.nNodes)
+					+ 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[point % _disc.nNodes])) / static_cast<double>(_disc.length_);
 
 				// Get workspace memory
 				BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -1395,7 +1397,7 @@ namespace cadet
 					continue;
 
 				// Midpoint of current column node (z coordinate) - needed in externally dependent adsorption kinetic
-				double z = _disc.deltaZ * std::floor(col / _disc.nNodes) + 0.5 * _disc.deltaZ * (1 + _disc.nodes[col % _disc.nNodes]);
+				double z = static_cast<double>(_disc.deltaZ) * std::floor(col / _disc.nNodes) + 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[col % _disc.nNodes]);
 
 				// Get iterators to beginning of solid phase
 				linalg::BandedEigenSparseRowIterator jacSolidOrig(_jac, idxr.strideColNode() * col + idxr.strideColLiquid());
