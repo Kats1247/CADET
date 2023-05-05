@@ -36,8 +36,8 @@
 #include "Memory.hpp"
 #include "model/ModelUtils.hpp"
 #include "ParameterMultiplexing.hpp"
-#include <Eigen\Dense>
-#include <Eigen\Sparse>
+#include <Eigen/Dense>
+#include <Eigen/Sparse>
 #include <array>
 #include <vector>
 #ifndef _USE_MATH_DEFINES
