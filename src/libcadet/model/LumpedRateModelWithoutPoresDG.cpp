@@ -326,15 +326,18 @@ namespace cadet
 
 		void LumpedRateModelWithoutPoresDG::useAnalyticJacobian(const bool analyticJac)
 		{
+
+			Indexer idxr(_disc);
+
 #ifndef CADET_CHECK_ANALYTIC_JACOBIAN
 			_analyticJac = analyticJac;
 			if (!_analyticJac)
-				_jacobianAdDirs = _jac.cols();
+				_jacobianAdDirs = (_disc.exactInt) ? 4 * _disc.nNodes * idxr.strideColNode() + 1 : 2 * _disc.nNodes * idxr.strideColNode() + 1;
 			else
 				_jacobianAdDirs = 0;
 #else
 			_analyticJac = false;
-			_jacobianAdDirs = _jac.cols();
+			_jacobianAdDirs = (_disc.exactInt) ? 4 * _disc.nNodes * idxr.strideColNode() + 1 : 2 * _disc.nNodes * idxr.strideColNode() + 1;
 #endif
 		}
 
@@ -356,9 +359,20 @@ namespace cadet
 			}
 
 			// Setup the matrix connecting inlet DOFs to first column cells
-			//_jacInlet.clear();
-			const double h = static_cast<double>(_convDispOp.columnLength()) / static_cast<double>(_disc.nCol);
 			const double u = static_cast<double>(_convDispOp.currentVelocity());
+
+			if (u >= 0.0) { // forward flow upwind convection
+				if(_disc.exactInt)
+					_jacInlet = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
+				else
+					_jacInlet(0, 0) = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock(0, 0); // only first node depends on inlet concentration
+			}
+			else {  // backward flow upwind convection
+				if (_disc.exactInt)
+					_jacInlet = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock.col(_disc.DGjacAxConvBlock.cols() - 1); // only last cell depends on inlet concentration
+				else
+					_jacInlet(0, 0) = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock(_disc.DGjacAxConvBlock.rows() - 1, _disc.DGjacAxConvBlock.cols() - 1); // only last node depends on inlet concentration
+			}
 
 			prepareADvectors(adJac);
 		}
@@ -394,7 +408,7 @@ namespace cadet
 
 		void LumpedRateModelWithoutPoresDG::prepareADvectors(const AdJacobianParams& adJac) const
 		{
-			// Early out if AD is disabled
+			// Early out if AD Jacobian is disabled
 			if (!adJac.adY)
 				return;
 
@@ -440,7 +454,7 @@ namespace cadet
 				{
 					if (eq - lowerBandwidth + diag >= 0 && // left boundary
 						eq - lowerBandwidth + diag < _jac.cols() && // right boundary
-						adVec[eq].getADValue(adDirOffset + dir) != 0.0 // do not change pattern
+						adVec[eq].getADValue(adDirOffset + dir) != 0.0 // keep pattern
 						)
 						_jac.coeffRef(eq, eq - lowerBandwidth + diag) = adVec[eq].getADValue(adDirOffset + dir);
 
@@ -466,7 +480,7 @@ namespace cadet
 		{
 			Indexer idxr(_disc);
 
-			// @TODO @SAM Ad returned Dense Jacobian? 
+			// @TODO
 			//const double maxDiff = ad::compareBandedJacobianWithAd(adRes + idxr.offsetC(), adDirOffset, _jac.lowerBandwidth(), _jac);
 			//LOG(Debug) << "AD dir offset: " << adDirOffset << " DiagDirCol: " << _jac.lowerBandwidth() << " MaxDiff: " << maxDiff;
 		}
@@ -770,11 +784,28 @@ namespace cadet
 		void LumpedRateModelWithoutPoresDG::multiplyWithJacobian(const SimulationTime& simTime, const ConstSimulationState& simState, double const* yS, double alpha, double beta, double* ret)
 		{
 
-			Eigen::Map<Eigen::VectorXd> _ret(ret, numDofs());
-			Eigen::Map<const Eigen::VectorXd> _yS(yS, numDofs());
+			Indexer idxr(_disc);
 
-			_ret = alpha * _jac * _yS + beta * _ret; // NOTE: inlet DOFs are included in DG jacobian
+			// Handle identity matrix of inlet DOFs
+			for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+			{
+				ret[comp] = alpha * yS[comp] + beta * ret[comp];
+			}
 
+			// Main Jacobian
+			Eigen::Map<Eigen::VectorXd> ret_vec(ret + idxr.offsetC(), numPureDofs());
+			Eigen::Map<const Eigen::VectorXd> yS_vec(yS + idxr.offsetC(), numPureDofs());
+			ret_vec = alpha * _jac * yS_vec + beta * ret_vec;
+
+			// Map inlet DOFs to the column inlet (first bulk cells)
+			// Inlet at z = 0 for forward flow, at z = L for backward flow.
+			unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+
+			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
+				for (unsigned int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
+					ret[idxr.offsetC() + offInlet + comp * idxr.strideColComp() + node * idxr.strideColNode()] += alpha * _jacInlet(node, 0) * yS[comp];
+				}
+			}
 		}
 
 		/**
@@ -790,11 +821,26 @@ namespace cadet
 		{
 			Indexer idxr(_disc);
 			const double invBeta = (1.0 / static_cast<double>(_totalPorosity) - 1.0);
+			
+			// todo: use DGConvDispOp to call multiplyWithDerivativeJacobian, FV operator uses nCol and strideCol
+			//_convDispOp.multiplyWithDerivativeJacobian(simTime, sDot, ret);
+			// begin multiplyWithDerivativeJacobian DG
+			double* localRet = ret + idxr.offsetC();
+			double const* localSdot = sDot + idxr.offsetC();
+			const int gapCell = idxr.strideColNode() - static_cast<int>(_disc.nComp) * idxr.strideColComp();
 
-			_convDispOp.multiplyWithDerivativeJacobian(simTime, sDot, ret);
-			for (unsigned int col = 0; col < _disc.nCol; ++col)
+			for (unsigned int i = 0; i < _disc.nPoints; ++i, localRet += gapCell, localSdot += gapCell)
 			{
-				const unsigned int localOffset = idxr.offsetC() + col * idxr.strideColCell();
+				for (unsigned int j = 0; j < _disc.nComp; ++j, ++localRet, ++localSdot)
+				{
+					*localRet = (*localSdot);
+				}
+			}
+			// end multiplyWithDerivativeJacobian DG
+
+			for (unsigned int node = 0; node < _disc.nPoints; ++node)
+			{
+				const unsigned int localOffset = idxr.offsetC() + node * idxr.strideColNode();
 				double const* const localSdot = sDot + localOffset;
 				double* const localRet = ret + localOffset;
 
@@ -1649,8 +1695,7 @@ namespace cadet
 		
 						// Extract subproblem Jacobian from full Jacobian
 						jacobianMatrix.setAll(0.0);
-						const MatrixXd test = _jac.toDense();
-						linalg::copyMatrixSubset(test, mask, mask, jacRowOffset, 0, jacobianMatrix);
+						linalg::copyMatrixSubset(_jac, mask, mask, jacRowOffset, 0, jacobianMatrix);
 		
 						// Construct right hand side: rhs = -dF / dp |\mathcal{I}_a
 						linalg::selectVectorSubset(sensYdot + localQOffset, mask, rhs);
@@ -1794,9 +1839,9 @@ namespace cadet
 				double* const sensYdot = vecSensYdot[param];
 
 				// Copy parameter derivative from AD to tempState and negate it
-				for (unsigned int col = 0; col < _disc.nCol; ++col)
+				for (unsigned int node = 0; node < _disc.nPoints; ++node)
 				{
-					const unsigned int localOffset = idxr.offsetC() + col * idxr.strideColCell();
+					const unsigned int localOffset = idxr.offsetC() + node * idxr.strideColNode();
 					for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
 					{
 						_tempState[localOffset + comp] = -adRes[localOffset + comp].getADValue(param);
@@ -1809,10 +1854,10 @@ namespace cadet
 				multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, _tempState);
 
 				const double invBeta = (1.0 / static_cast<double>(_totalPorosity) - 1.0);
-				for (unsigned int col = 0; col < _disc.nCol; ++col)
+				for (unsigned int node = 0; node < _disc.nPoints; ++node)
 				{
 					// Offset to current cell's c and q variables
-					const unsigned int localOffset = idxr.offsetC() + col * idxr.strideColCell();
+					const unsigned int localOffset = idxr.offsetC() + node * idxr.strideColNode();
 					const unsigned int localOffsetQ = localOffset + idxr.strideColLiquid();
 
 					for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
