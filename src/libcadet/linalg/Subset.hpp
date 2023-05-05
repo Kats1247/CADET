@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 namespace cadet
 {
@@ -547,6 +548,34 @@ namespace linalg
 					continue;
 
 				ptrDest[idx] = ptrSrc[c];
+				++idx;
+			}
+
+			ptrDest += dest.stride();
+		}
+	}
+	inline void copyMatrixSubset(const Eigen::SparseMatrix<double, Eigen::RowMajor>& src, const ConstMaskArray& rowMask, const ConstMaskArray& colMask, int rowOffset, int colOffset, detail::DenseMatrixBase& dest)
+	{
+		cadet_assert(dest.rows() >= numMaskActive(rowMask));
+		cadet_assert(dest.columns() >= numMaskActive(colMask));
+		cadet_assert(src.rows() >= rowMask.len);
+		cadet_assert(src.cols() >= colMask.len);
+
+		double* ptrDest = dest.data();
+
+		for (int r = 0; r < rowMask.len; ++r)
+		{
+			if (!rowMask.mask[r])
+				continue;
+
+			int idx = 0;
+			for (int c = 0; c < colMask.len; ++c)
+			{
+				if (!colMask.mask[c])
+					continue;
+
+				ptrDest[idx] = src.coeff(rowOffset + r, colOffset + c);
+
 				++idx;
 			}
 
