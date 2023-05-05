@@ -36,7 +36,7 @@
 #include "Memory.hpp"
 #include "model/ModelUtils.hpp"
 #include "ParameterMultiplexing.hpp"
-#include <Eigen/Dense> // use LA lib Eigen for Matrix operations
+#include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <array>
 #include <vector>
@@ -2518,9 +2518,9 @@ protected:
 
 	}
 	/**
-	 * @brief sets the sparsity pattern of the convection dispersion Jacobian
+	 * @brief sets the sparsity pattern of the binding Jacobian
 	 */
-	void parIsothermPattern_GRM(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode) {
+	void parBindingPattern_GRM(std::vector<T>& tripletList, unsigned int parType, unsigned int colNode) {
 
 		Indexer idxr(_disc);
 
@@ -2533,7 +2533,7 @@ protected:
 					// row: jump over previous nodes and liquid states and add current bound state offset
 					// col: jump over previous nodes and add current concentration offset (liquid and bound)
 					tripletList.push_back(T(offset + parNode * idxr.strideParNode(parType) + idxr.strideParLiquid() + bnd,
-											offset + parNode * idxr.strideParNode(parType) + conc, 0.0));
+						offset + parNode * idxr.strideParNode(parType) + conc, 0.0));
 				}
 			}
 		}
@@ -2576,7 +2576,7 @@ protected:
 
 		parTimeDerJacPattern_GRM(tripletList, parType, colNode, secIdx);
 
-		parIsothermPattern_GRM(tripletList, parType, colNode);
+		parBindingPattern_GRM(tripletList, parType, colNode);
 	}
 	/**
 	 * @brief returns the offset between state order and parameter storage (bnd0comp0, bnd0comp1, bnd0comp2, bnd1comp0, bnd1comp1, bnd1comp2, ...) for one components bound state for a certain particle type
