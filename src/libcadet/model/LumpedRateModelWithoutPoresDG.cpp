@@ -96,7 +96,7 @@ namespace cadet
 #endif
 		}
 
-		bool LumpedRateModelWithoutPoresDG::configureModelDiscretization(IParameterProvider& paramProvider, IConfigHelper& helper)
+		bool LumpedRateModelWithoutPoresDG::configureModelDiscretization(IParameterProvider& paramProvider, const IConfigHelper& helper)
 		{
 			// Read discretization
 			_disc.nComp = paramProvider.getInt("NCOMP");
@@ -151,7 +151,7 @@ namespace cadet
 
 			const unsigned int strideCell = _disc.nNodes;
 
-			const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, _disc.nComp, _disc.nCol, strideCell);
+			const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.nCol, strideCell);
 
 			_disc.dispersion = new active[_disc.nComp]; // fill later on with convDispOp (section and component dependent)
 
@@ -1899,6 +1899,74 @@ namespace cadet
 			}
 
 			return UnitOperationBase::setSensitiveParameter(pId, adDirection, adValue);
+		}
+
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeMobilePhase(double* buffer) const
+		{
+			const int stride = _idx.strideColNode();
+			double const* ptr = _data + _idx.offsetC();
+			for (unsigned int i = 0; i < _disc.nPoints; ++i)
+			{
+				std::copy_n(ptr, _disc.nComp, buffer);
+				buffer += _disc.nComp;
+				ptr += stride;
+			}
+			return _disc.nPoints * _disc.nComp;
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeSolidPhase(double* buffer) const
+		{
+			const int stride = _idx.strideColNode();
+			double const* ptr = _data + _idx.offsetC() + _idx.strideColLiquid();
+			for (unsigned int i = 0; i < _disc.nPoints; ++i)
+			{
+				std::copy_n(ptr, _disc.strideBound, buffer);
+				buffer += _disc.strideBound;
+				ptr += stride;
+			}
+			return _disc.nPoints * _disc.strideBound;
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeSolidPhase(unsigned int parType, double* buffer) const
+		{
+			cadet_assert(parType == 0);
+			return writeSolidPhase(buffer);
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeInlet(unsigned int port, double* buffer) const
+		{
+			cadet_assert(port == 0);
+			std::copy_n(_data, _disc.nComp, buffer);
+			return _disc.nComp;
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeInlet(double* buffer) const
+		{
+			std::copy_n(_data, _disc.nComp, buffer);
+			return _disc.nComp;
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeOutlet(unsigned int port, double* buffer) const
+		{
+			cadet_assert(port == 0);
+
+			if (_model._convDispOp.currentVelocity() >= 0)
+				std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
+			else
+				std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);
+
+			return _disc.nComp;
+		}
+
+		int LumpedRateModelWithoutPoresDG::Exporter::writeOutlet(double* buffer) const
+		{
+			if (_model._convDispOp.currentVelocity() >= 0)
+				std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
+			else
+				std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);
+
+			return _disc.nComp;
 		}
 
 		void registerLumpedRateModelWithoutPoresDG(std::unordered_map<std::string, std::function<IUnitOperation*(UnitOpIdx)>>& models)

@@ -10,7 +10,7 @@
 //  is available at http://www.gnu.org/licenses/gpl.html
 // =============================================================================
 
-#include "model/GeneralRateModel.hpp"
+#include "model/GeneralRateModelDGFV.hpp"
 #include "model/BindingModel.hpp"
 #include "model/parts/BindingCellKernel.hpp"
 #include "linalg/DenseMatrix.hpp"
@@ -109,13 +109,15 @@ namespace model
  * @param [in] simState State of the simulation (state vector and its time derivatives) at which the Jacobian is evaluated
  * @return @c 0 on success, @c -1 on non-recoverable error, and @c +1 on recoverable error
  */
-template <typename ConvDispOperator>
-int GeneralRateModel<ConvDispOperator>::linearSolve(double t, double alpha, double outerTol, double* const rhs, double const* const weight,
+int GeneralRateModelDGFV::linearSolve(double t, double alpha, double outerTol, double* const rhs, double const* const weight,
 	const ConstSimulationState& simState)
 {
 	BENCH_SCOPE(_timerLinearSolve);
 
 	Indexer idxr(_disc);
+
+	Eigen::Map<VectorXd> r(rhs, numDofs()); // map rhs to Eigen object
+	Eigen::Map<VectorXd> _tmpState(_tempState, numDofs()); // map temporary storage to Eigen object
 
 	// ==== Step 1: Factorize diagonal Jacobian blocks
 
@@ -131,42 +133,44 @@ int GeneralRateModel<ConvDispOperator>::linearSolve(double t, double alpha, doub
 #ifdef CADET_PARALLELIZE
 		node_t A(g, [&](msg_t)
 #endif
-		{
-			// Assemble and factorize discretized bulk Jacobian
-			const bool result = _convDispOp.assembleAndFactorizeDiscretizedJacobian(alpha);
-			if (cadet_unlikely(!result))
 			{
-				LOG(Error) << "Factorize() failed for bulk block";
-			}
-		} CADET_PARNODE_END;
+				// Assemble and factorize discretized bulk Jacobian
+				assembleDiscretizedBulkJacobian(alpha, idxr);
+				_bulkSolver.factorize(_jacCdisc);
 
-	// Process the particle blocks
+				if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
+				{
+					LOG(Error) << "Factorize() failed for bulk block";
+				}
+			} CADET_PARNODE_END;
+
+		// Process the particle blocks
 #ifdef CADET_PARALLELIZE
 		node_t B(g, [&](msg_t)
 #endif
-		{
-#ifdef CADET_PARALLELIZE
-			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol * _disc.nParType), [&](std::size_t pblk)
-#else
-			for (unsigned int pblk = 0; pblk < _disc.nCol * _disc.nParType; ++pblk)
-#endif
 			{
-				const unsigned int type = pblk / _disc.nCol;
-				const unsigned int par = pblk % _disc.nCol;
-
-				// Assemble
-				assembleDiscretizedJacobianParticleBlock(type, par, alpha, idxr);
-
-				// Factorize
-				const bool result = _jacPdisc[pblk].factorize();
-				if (cadet_unlikely(!result))
+#ifdef CADET_PARALLELIZE
+				tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints * _disc.nParType), [&](std::size_t pblk)
+#else
+				for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+#endif
 				{
+					const unsigned int type = pblk / _disc.nPoints;
+					const unsigned int par = pblk % _disc.nPoints;
+
+					// Assemble
+					assembleDiscretizedJacobianParticleBlock(type, par, alpha, idxr);
+
+					// Factorize
+					const bool result = _jacPdisc[pblk].factorize();
+					if (cadet_unlikely(!result))
 					{
-						LOG(Error) << "Factorize() failed for par block " << pblk;
+						{
+							LOG(Error) << "Factorize() failed for par block " << pblk;
+						}
 					}
-				}
-			} CADET_PARFOR_END;
-		} CADET_PARNODE_END;
+				} CADET_PARFOR_END;
+					} CADET_PARNODE_END;
 
 #ifndef CADET_PARALLELIZE
 		// Do not factorize again at next call without changed Jacobians
@@ -180,46 +184,51 @@ int GeneralRateModel<ConvDispOperator>::linearSolve(double t, double alpha, doub
 #ifdef CADET_PARALLELIZE
 	node_t C(g, [&](msg_t)
 #endif
-	{
-		_jacInlet.multiplySubtract(rhs, rhs + idxr.offsetC());
-	} CADET_PARNODE_END;
+		{
+			// handle inlet DOFs
+			for (int comp = 0; comp < _disc.nComp; comp++) {
+				for (int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
+					r[idxr.offsetC() + comp * idxr.strideColComp() + node * idxr.strideColNode()] += _jacInlet(node, 0) * r[comp];
+				}
+			}
+		} CADET_PARNODE_END;
 
 	// ==== Step 2: Solve diagonal Jacobian blocks J_i to get y_i = J_i^{-1} b_i
 	// The result is stored in rhs (in-place solution)
-
 
 	// Threads that are done with solving the bulk column blocks can proceed
 	// to solving the particle blocks
 #ifdef CADET_PARALLELIZE
 	node_t D(g, [&](msg_t)
 #endif
-	{
-		const bool result = _convDispOp.solveDiscretizedJacobian(rhs + idxr.offsetC());
-		if (cadet_unlikely(!result))
 		{
-			LOG(Error) << "Solve() failed for bulk block";
-		}
-	} CADET_PARNODE_END;
+			r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(r.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+
+			if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
+			{
+				LOG(Error) << "Solve() failed for bulk block";
+			}
+		} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	node_t E(g, [&](msg_t)
 #endif
-	{
-#ifdef CADET_PARALLELIZE
-		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol * _disc.nParType), [&](std::size_t pblk)
-#else
-		for (unsigned int pblk = 0; pblk < _disc.nCol * _disc.nParType; ++pblk)
-#endif
 		{
-			const unsigned int type = pblk / _disc.nCol;
-			const unsigned int par = pblk % _disc.nCol;
-			const bool result = _jacPdisc[pblk].solve(rhs + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par}));
-			if (cadet_unlikely(!result))
+#ifdef CADET_PARALLELIZE
+			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints * _disc.nParType), [&](std::size_t pblk)
+#else
+			for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+#endif
 			{
-				LOG(Error) << "Solve() failed for par block " << pblk;
-			}
-		} CADET_PARFOR_END;
-	} CADET_PARNODE_END;
+				const unsigned int type = pblk / _disc.nPoints;
+				const unsigned int par = pblk % _disc.nPoints;
+				const bool result = _jacPdisc[pblk].solve(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }));
+				if (cadet_unlikely(!result))
+				{
+					LOG(Error) << "Solve() failed for par block " << pblk;
+				}
+			} CADET_PARFOR_END;
+				} CADET_PARNODE_END;
 
 	// Solve last row of L with backwards substitution: y_f = b_f - \sum_{i=0}^{N_z} J_{f,i} y_i
 	// Note that we cannot easily parallelize this loop since the results of the sparse
@@ -228,100 +237,101 @@ int GeneralRateModel<ConvDispOperator>::linearSolve(double t, double alpha, doub
 #ifdef CADET_PARALLELIZE
 	node_t F(g, [&](msg_t)
 #endif
-	{
-		_jacFC.multiplySubtract(rhs + idxr.offsetC(), rhs + idxr.offsetJf());
-
-		for (unsigned int type = 0; type < _disc.nParType; ++type)
 		{
-			for (unsigned int par = 0; par < _disc.nCol; ++par)
+			_jacFC.multiplySubtract(rhs + idxr.offsetC(), rhs + idxr.offsetJf());
+
+			for (unsigned int type = 0; type < _disc.nParType; ++type)
 			{
-				_jacFP[type * _disc.nCol + par].multiplySubtract(rhs + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par}), rhs + idxr.offsetJf());
+				for (unsigned int par = 0; par < _disc.nPoints; ++par)
+				{
+					_jacFP[type * _disc.nPoints + par].multiplySubtract(rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), rhs + idxr.offsetJf());
+				}
 			}
-		}
 
-		// Now, rhs contains the full intermediate solution y = L^{-1} b
+			// Now, rhs contains the full intermediate solution y = L^{-1} b
 
-		// Initialize temporary storage by copying over the fluxes
-		// Note that the rest of _tempState is zeroed out in schurComplementMatrixVector()
-		std::copy(rhs + idxr.offsetJf(), rhs + numDofs(), _tempState + idxr.offsetJf());
+			// Initialize temporary storage by copying over the fluxes
+			// Note that the rest of _tempState is zeroed out in schurComplementMatrixVector()
+			std::copy(rhs + idxr.offsetJf(), rhs + numDofs(), _tempState + idxr.offsetJf());
 
-		// ==== Step 3: Solve Schur-complement to get x_f = S^{-1} y_f
-		// Column and particle parts remain unchanged.
-		// The only thing to be done is the iterative (and approximate)
-		// solution of the Schur complement system:
-		//     S * x_f = y_f
+			// ==== Step 3: Solve Schur-complement to get x_f = S^{-1} y_f
+			// Column and particle parts remain unchanged.
+			// The only thing to be done is the iterative (and approximate)
+			// solution of the Schur complement system:
+			//     S * x_f = y_f
 
-		// Note that rhs is updated in-place with the solution of the Schur-complement
-		// The temporary storage is only needed to hold the right hand side of the Schur-complement
-		const double tolerance = std::sqrt(static_cast<double>(_gmres.matrixSize())) * outerTol * _schurSafety;
+			// Note that rhs is updated in-place with the solution of the Schur-complement
+			// The temporary storage is only needed to hold the right hand side of the Schur-complement
+			const double tolerance = std::sqrt(static_cast<double>(_gmres.matrixSize())) * outerTol * _schurSafety;
 
-		BENCH_START(_timerGmres);
-		_gmres.solve(tolerance, weight + idxr.offsetJf(), _tempState + idxr.offsetJf(), rhs + idxr.offsetJf());
-		BENCH_STOP(_timerGmres);
+			BENCH_START(_timerGmres);
+			_gmres.solve(tolerance, weight + idxr.offsetJf(), _tempState + idxr.offsetJf(), rhs + idxr.offsetJf());
+			BENCH_STOP(_timerGmres);
 
-		// Remove temporary results that are leftovers from schurComplementMatrixVector()
-		std::fill(_tempState + idxr.offsetC(), _tempState + idxr.offsetJf(), 0.0);
+			// Remove temporary results that are leftovers from schurComplementMatrixVector()
+			std::fill(_tempState + idxr.offsetC(), _tempState + idxr.offsetJf(), 0.0);
 
-		// At this point, rhs contains the intermediate solution [y_0, ..., y_{N_z}, x_f]
+			// At this point, rhs contains the intermediate solution [y_0, ..., y_{N_z}, x_f]
 
-		// ==== Step 4: Solve U * x = y by backward substitution
-		// The fluxes are already solved and remain unchanged
+			// ==== Step 4: Solve U * x = y by backward substitution
+			// The fluxes are already solved and remain unchanged
 
-		// Compute tempState_0 = J_{0,f} * y_f
-		_jacCF.multiplyAdd(rhs + idxr.offsetJf(), _tempState + idxr.offsetC());
-	} CADET_PARNODE_END;
+			// Compute tempState_0 = J_{0,f} * y_f
+			_jacCF.multiplyAdd(rhs + idxr.offsetJf(), _tempState + idxr.offsetC());
+		} CADET_PARNODE_END;
 
 	// Threads that are done with solving the bulk column blocks can proceed
 	// to solving the particle blocks
 #ifdef CADET_PARALLELIZE
 	node_t G(g, [&](msg_t)
 #endif
-	{
-		double* const localCol = _tempState + idxr.offsetC();
-		double* const rhsCol = rhs + idxr.offsetC();
-
-		// Apply J_0^{-1} to tempState_0
-		const bool result = _convDispOp.solveDiscretizedJacobian(localCol);
-		if (cadet_unlikely(!result))
 		{
-			LOG(Error) << "Solve() failed for bulk block";
-		}
+			double* const localCol = _tempState + idxr.offsetC();
+			double* const rhsCol = rhs + idxr.offsetC();
 
-		// Compute rhs_0 = y_0 - J_0^{-1} * J_{0,f} * y_f = y_0 - tempState_0
-		for (unsigned int i = 0; i < _disc.nCol * _disc.nComp; ++i)
-			rhsCol[i] -= localCol[i];
-	} CADET_PARNODE_END;
+			// Apply J_0^{-1} to tempState_0
+			_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+
+			if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
+			{
+				LOG(Error) << "Solve() failed for bulk block";
+			}
+
+			// Compute rhs_0 = y_0 - J_0^{-1} * J_{0,f} * y_f = y_0 - tempState_0
+			for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
+				rhsCol[i] -= localCol[i];
+		} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	node_t H(g, [&](msg_t)
 #endif
-	{
-#ifdef CADET_PARALLELIZE
-		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol * _disc.nParType), [&](std::size_t pblk)
-#else
-		for (unsigned int pblk = 0; pblk < _disc.nCol * _disc.nParType; ++pblk)
-#endif
 		{
-			const unsigned int type = pblk / _disc.nCol;
-			const unsigned int par = pblk % _disc.nCol;
-
-			double* const localPar = _tempState + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par});
-			double* const rhsPar = rhs + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par});
-
-			// Compute tempState_i = J_{i,f} * y_f
-			_jacPF[pblk].multiplyAdd(rhs + idxr.offsetJf(), localPar);
-			// Apply J_i^{-1} to tempState_i
-			const bool result = _jacPdisc[pblk].solve(localPar);
-			if (cadet_unlikely(!result))
+#ifdef CADET_PARALLELIZE
+			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints * _disc.nParType), [&](std::size_t pblk)
+#else
+			for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+#endif
 			{
-				LOG(Error) << "Solve() failed for par block " << pblk;
-			}
+				const unsigned int type = pblk / _disc.nPoints;
+				const unsigned int par = pblk % _disc.nPoints;
 
-			// Compute rhs_i = y_i - J_i^{-1} * J_{i,f} * y_f = y_i - tempState_i
-			for (int i = 0; i < idxr.strideParBlock(type); ++i)
-				rhsPar[i] -= localPar[i];
-		} CADET_PARFOR_END;
-	} CADET_PARNODE_END;
+				double* const localPar = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+				double* const rhsPar = rhs + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+
+				// Compute tempState_i = J_{i,f} * y_f
+				_jacPF[pblk].multiplyAdd(rhs + idxr.offsetJf(), localPar);
+				// Apply J_i^{-1} to tempState_i
+				const bool result = _jacPdisc[pblk].solve(localPar);
+				if (cadet_unlikely(!result))
+				{
+					LOG(Error) << "Solve() failed for par block " << pblk;
+				}
+
+				// Compute rhs_i = y_i - J_i^{-1} * J_{i,f} * y_f = y_i - tempState_i
+				for (int i = 0; i < idxr.strideParBlock(type); ++i)
+					rhsPar[i] -= localPar[i];
+			} CADET_PARFOR_END;
+				} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	// Create TBB dependency graph
@@ -376,16 +386,16 @@ int GeneralRateModel<ConvDispOperator>::linearSolve(double t, double alpha, doub
  * @param [out] z Result of the matrix-vector multiplication
  * @return @c 0 if successful, any other value in case of failure
  */
-template <typename ConvDispOperator>
-int GeneralRateModel<ConvDispOperator>::schurComplementMatrixVector(double const* x, double* z) const
+int GeneralRateModelDGFV::schurComplementMatrixVector(double const* x, double* z) const
 {
 	BENCH_SCOPE(_timerMatVec);
 
 	// Copy x over to result z, which corresponds to the application of the identity matrix
-	std::copy(x, x + _disc.nCol * _disc.nComp * _disc.nParType, z);
+	std::copy(x, x + _disc.nPoints * _disc.nComp * _disc.nParType, z);
 
 	Indexer idxr(_disc);
 	std::fill(_tempState + idxr.offsetC(), _tempState + idxr.offsetJf(), 0.0);
+	Eigen::Map<VectorXd> _tmpState(_tempState, numDofs());
 
 #ifdef CADET_PARALLELIZE
 	tbb::flow::graph g;
@@ -399,59 +409,60 @@ int GeneralRateModel<ConvDispOperator>::schurComplementMatrixVector(double const
 #ifdef CADET_PARALLELIZE
 	node_t A(g, [&](msg_t)
 #endif
-	{
-		// Apply J_0^{-1}
-		const bool result = _convDispOp.solveDiscretizedJacobian(_tempState + idxr.offsetC());
-		if (cadet_unlikely(!result))
 		{
-			LOG(Error) << "Solve() failed for bulk block";
-		}
-	} CADET_PARNODE_END;
+			// Apply J_0^{-1}
+			_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints) = _bulkSolver.solve(_tmpState.segment(idxr.offsetC(), _disc.nComp * _disc.nPoints));
+
+			if (cadet_unlikely(_bulkSolver.info() != Eigen::Success))
+			{
+				LOG(Error) << "Solve() failed for bulk block";
+			}
+		} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	node_t B(g, [&](msg_t)
 #endif
-	{
-		// Handle particle blocks
-#ifdef CADET_PARALLELIZE
-		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol * _disc.nParType), [&](std::size_t pblk)
-#else
-		for (unsigned int pblk = 0; pblk < _disc.nCol * _disc.nParType; ++pblk)
-#endif
 		{
-			const unsigned int type = pblk / _disc.nCol;
-			const unsigned int par = pblk % _disc.nCol;
-
-			// Get this thread's temporary memory block
-			double* const tmp = _tempState + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par});
-
-			// Apply J_{i,f}
-			_jacPF[pblk].multiplyAdd(x, tmp);
-			// Apply J_{i}^{-1}
-			const bool result = _jacPdisc[pblk].solve(tmp);
-			if (cadet_unlikely(!result))
+			// Handle particle blocks
+#ifdef CADET_PARALLELIZE
+			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints * _disc.nParType), [&](std::size_t pblk)
+#else
+			for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+#endif
 			{
-				LOG(Error) << "Solve() failed for par block " << pblk;
-			}
-		} CADET_PARFOR_END;
-	} CADET_PARNODE_END;
+				const unsigned int type = pblk / _disc.nPoints;
+				const unsigned int par = pblk % _disc.nPoints;
+
+				// Get this thread's temporary memory block
+				double* const tmp = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+
+				// Apply J_{i,f}
+				_jacPF[pblk].multiplyAdd(x, tmp);
+				// Apply J_{i}^{-1}
+				const bool result = _jacPdisc[pblk].solve(tmp);
+				if (cadet_unlikely(!result))
+				{
+					LOG(Error) << "Solve() failed for par block " << pblk;
+				}
+			} CADET_PARFOR_END;
+				} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	node_t C(g, [&](msg_t)
 #endif
-	{
-		// Apply J_{f,0} and subtract results from z
-		_jacFC.multiplySubtract(_tempState + idxr.offsetC(), z);
-
-		for (unsigned int type = 0; type < _disc.nParType; ++type)
 		{
-			for (unsigned int par = 0; par < _disc.nCol; ++par)
+			// Apply J_{f,0} and subtract results from z
+			_jacFC.multiplySubtract(_tempState + idxr.offsetC(), z);
+
+			for (unsigned int type = 0; type < _disc.nParType; ++type)
 			{
-				// Apply J_{f,i} and subtract results from z
-				_jacFP[type * _disc.nCol + par].multiplySubtract(_tempState + idxr.offsetCp(ParticleTypeIndex{type}, ParticleIndex{par}), z);
+				for (unsigned int par = 0; par < _disc.nPoints; ++par)
+				{
+					// Apply J_{f,i} and subtract results from z
+					_jacFP[type * _disc.nPoints + par].multiplySubtract(_tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }), z);
+				}
 			}
-		}
-	} CADET_PARNODE_END;
+		} CADET_PARNODE_END;
 
 #ifdef CADET_PARALLELIZE
 	make_edge(A, C);
@@ -466,6 +477,37 @@ int GeneralRateModel<ConvDispOperator>::schurComplementMatrixVector(double const
 #endif
 
 	return 0;
+}
+
+/**
+ * @brief Assembles bulk Jacobian @f$ J_i @f$ (@f$ i > 0 @f$) of the time-discretized equations
+ * @details The system \f[ \left( \frac{\partial F}{\partial y} + \alpha \frac{\partial F}{\partial \dot{y}} \right) x = b \f]
+ *          has to be solved. The system Jacobian of the original equations,
+ *          \f[ \frac{\partial F}{\partial y}, \f]
+ *          is already computed (by AD or manually in residualImpl() with @c wantJac = true). This function is responsible
+ *          for adding
+ *          \f[ \alpha \frac{\partial F}{\partial \dot{y}} \f]
+ *          to the system Jacobian, which yields the Jacobian of the time-discretized equations
+ *          \f[ F\left(t, y_0, \sum_{k=0}^N \alpha_k y_k \right) = 0 \f]
+ *          when a BDF method is used. The time integrator needs to solve this equation for @f$ y_0 @f$, which requires
+ *          the solution of the linear system mentioned above (@f$ \alpha_0 = \alpha @f$ given in @p alpha).
+ *
+ * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
+ */
+void GeneralRateModelDGFV::assembleDiscretizedBulkJacobian(double alpha, Indexer idxr) {
+
+	double* vPtr = _jacCdisc.valuePtr();
+	for (int k = 0; k < _jacCdisc.nonZeros(); k++) {
+		*vPtr = 0.0;
+		vPtr++;
+	}
+
+	// add time derivative to bulk jacobian
+	addTimeDerBulkJacobian(alpha, idxr);
+
+	// add static (per section) jacobian
+	_jacCdisc += _jacC;
+
 }
 
 /**
@@ -486,11 +528,10 @@ int GeneralRateModel<ConvDispOperator>::schurComplementMatrixVector(double const
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  * @param [in] idxr Indexer
  */
-template <typename ConvDispOperator>
-void GeneralRateModel<ConvDispOperator>::assembleDiscretizedJacobianParticleBlock(unsigned int parType, unsigned int pblk, double alpha, const Indexer& idxr)
+void GeneralRateModelDGFV::assembleDiscretizedJacobianParticleBlock(unsigned int parType, unsigned int pblk, double alpha, const Indexer& idxr)
 {
-	linalg::FactorizableBandMatrix& fbm = _jacPdisc[_disc.nCol * parType + pblk];
-	const linalg::BandMatrix& bm = _jacP[_disc.nCol * parType + pblk];
+	linalg::FactorizableBandMatrix& fbm = _jacPdisc[_disc.nPoints * parType + pblk];
+	const linalg::BandMatrix& bm = _jacP[_disc.nPoints * parType + pblk];
 
 	// Copy normal matrix over to factorizable matrix
 	fbm.copyOver(bm);
@@ -514,12 +555,12 @@ void GeneralRateModel<ConvDispOperator>::assembleDiscretizedJacobianParticleBloc
  * @param [in] alpha Value of \f$ \alpha \f$ (arises from BDF time discretization)
  * @param [in] parType Index of the particle type
  */
-template <typename ConvDispOperator>
-void GeneralRateModel<ConvDispOperator>::addTimeDerivativeToJacobianParticleShell(linalg::FactorizableBandMatrix::RowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
+void GeneralRateModelDGFV::addTimeDerivativeToJacobianParticleShell(linalg::FactorizableBandMatrix::RowIterator& jac, const Indexer& idxr, double alpha, unsigned int parType)
 {
 	parts::cell::addTimeDerivativeToJacobianParticleShell<linalg::FactorizableBandMatrix::RowIterator, true>(jac, alpha, static_cast<double>(_parPorosity[parType]), _disc.nComp, _disc.nBound + _disc.nComp * parType,
 		_poreAccessFactor.data() + _disc.nComp * parType, _disc.strideBound[parType], _disc.boundOffset + _disc.nComp * parType, _binding[parType]->reactionQuasiStationarity());
 }
+
 
 }  // namespace model
 

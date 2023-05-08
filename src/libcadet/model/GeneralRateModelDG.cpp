@@ -127,14 +127,14 @@ void GeneralRateModelDG::clearParDepSurfDiffusion()
 	}
 	else
 	{
-		for (IParameterDependence* pd : _parDepSurfDiffusion)
+		for (IParameterStateDependence* pd : _parDepSurfDiffusion)
 			delete pd;
 	}
 
 	_parDepSurfDiffusion.clear();
 }
 
-bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramProvider, IConfigHelper& helper)
+bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramProvider, const IConfigHelper& helper)
 {
 	// ==== Read discretization
 	_disc.nComp = paramProvider.getInt("NCOMP");
@@ -379,43 +379,43 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 			{
 				_hasParDepSurfDiffusion = false;
 				_singleParDepSurfDiffusion = true;
-				_parDepSurfDiffusion = std::vector<IParameterDependence*>(_disc.nParType, nullptr);
+				_parDepSurfDiffusion = std::vector<IParameterStateDependence*>(_disc.nParType, nullptr);
 			}
 			else
 			{
-				IParameterDependence* const pd = helper.createParameterDependence(psdDepNames[0]);
+				IParameterStateDependence* const pd = helper.createParameterStateDependence(psdDepNames[0]);
 				if (!pd)
 					throw InvalidParameterException("Unknown parameter dependence " + psdDepNames[0]);
 
-				_parDepSurfDiffusion = std::vector<IParameterDependence*>(_disc.nParType, pd);
+				_parDepSurfDiffusion = std::vector<IParameterStateDependence*>(_disc.nParType, pd);
 				parSurfDiffDepConfSuccess = pd->configureModelDiscretization(paramProvider, _disc.nComp, _disc.nBound, _disc.boundOffset);
 				_hasParDepSurfDiffusion = true;
 			}
 		}
 		else
 		{
-			_parDepSurfDiffusion = std::vector<IParameterDependence*>(_disc.nParType, nullptr);
+			_parDepSurfDiffusion = std::vector<IParameterStateDependence*>(_disc.nParType, nullptr);
 
 			for (unsigned int i = 0; i < _disc.nParType; ++i)
 			{
 				if ((psdDepNames[0] == "") || (psdDepNames[0] == "NONE") || (psdDepNames[0] == "DUMMY"))
 					continue;
 
-				_parDepSurfDiffusion[i] = helper.createParameterDependence(psdDepNames[i]);
+				_parDepSurfDiffusion[i] = helper.createParameterStateDependence(psdDepNames[i]);
 				if (!_parDepSurfDiffusion[i])
 					throw InvalidParameterException("Unknown parameter dependence " + psdDepNames[i]);
 
 				parSurfDiffDepConfSuccess = _parDepSurfDiffusion[i]->configureModelDiscretization(paramProvider, _disc.nComp, _disc.nBound + i * _disc.nComp, _disc.boundOffset + i * _disc.nComp) && parSurfDiffDepConfSuccess;
 			}
 
-			_hasParDepSurfDiffusion = std::any_of(_parDepSurfDiffusion.cbegin(), _parDepSurfDiffusion.cend(), [](IParameterDependence const* pd) -> bool { return pd; });
+			_hasParDepSurfDiffusion = std::any_of(_parDepSurfDiffusion.cbegin(), _parDepSurfDiffusion.cend(), [](IParameterStateDependence const* pd) -> bool { return pd; });
 		}
 	}
 	else
 	{
 		_hasParDepSurfDiffusion = false;
 		_singleParDepSurfDiffusion = true;
-		_parDepSurfDiffusion = std::vector<IParameterDependence*>(_disc.nParType, nullptr);
+		_parDepSurfDiffusion = std::vector<IParameterStateDependence*>(_disc.nParType, nullptr);
 	}
 
 	if (optimizeParticleJacobianBandwidth)
@@ -454,7 +454,7 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 		_hasSurfaceDiffusion = std::vector<bool>(_disc.nParType, true);
 	}
 
-	const bool transportSuccess = _convDispOpB.configureModelDiscretization(paramProvider, _disc.nComp, _disc.nPoints, 0); // strideCell not needed for DG, so just set to zero
+	const bool transportSuccess = _convDispOpB.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.nPoints, 0); // strideCell not needed for DG, so just set to zero
 
 	_disc.dispersion = Eigen::VectorXd::Zero(_disc.nComp); // fill later on with convDispOpB (section and component dependent)
 
@@ -2232,6 +2232,131 @@ bool GeneralRateModelDG::hasParameter(const ParameterId& pId) const
 
 	return UnitOperationBase::hasParameter(pId);
 }
+
+int GeneralRateModelDG::Exporter::writeMobilePhase(double* buffer) const
+{
+	const int blockSize = numMobilePhaseDofs();
+	std::copy_n(_idx.c(_data), blockSize, buffer);
+	return blockSize;
+}
+
+int GeneralRateModelDG::Exporter::writeSolidPhase(double* buffer) const
+{
+	int numWritten = 0;
+	for (unsigned int i = 0; i < _disc.nParType; ++i)
+	{
+		const int n = writeParticleMobilePhase(i, buffer);
+		buffer += n;
+		numWritten += n;
+	}
+	return numWritten;
+}
+
+int GeneralRateModelDG::Exporter::writeParticleMobilePhase(double* buffer) const
+{
+	int numWritten = 0;
+	for (unsigned int i = 0; i < _disc.nParType; ++i)
+	{
+		const int n = writeParticleMobilePhase(i, buffer);
+		buffer += n;
+		numWritten += n;
+	}
+	return numWritten;
+}
+
+int GeneralRateModelDG::Exporter::writeSolidPhase(unsigned int parType, double* buffer) const
+{
+	cadet_assert(parType < _disc.nParType);
+
+	const unsigned int stride = _disc.nComp + _disc.strideBound[parType];
+	double const* ptr = _data + _idx.offsetCp(ParticleTypeIndex{ parType }) + _disc.nComp;
+	for (unsigned int i = 0; i < _disc.nPoints; ++i)
+	{
+		for (unsigned int j = 0; j < _disc.nParPoints[parType]; ++j)
+		{
+			std::copy_n(ptr, _disc.strideBound[parType], buffer);
+			buffer += _disc.strideBound[parType];
+			ptr += stride;
+		}
+	}
+	return _disc.nPoints * _disc.nParPoints[parType] * _disc.strideBound[parType];
+}
+
+int GeneralRateModelDG::Exporter::writeParticleMobilePhase(unsigned int parType, double* buffer) const
+{
+	cadet_assert(parType < _disc.nParType);
+
+	const unsigned int stride = _disc.nComp + _disc.strideBound[parType];
+	double const* ptr = _data + _idx.offsetCp(ParticleTypeIndex{ parType });
+	for (unsigned int i = 0; i < _disc.nPoints; ++i)
+	{
+		for (unsigned int j = 0; j < _disc.nParPoints[parType]; ++j)
+		{
+			std::copy_n(ptr, _disc.nComp, buffer);
+			buffer += _disc.nComp;
+			ptr += stride;
+		}
+	}
+	return _disc.nPoints * _disc.nParPoints[parType] * _disc.nComp;
+}
+
+int GeneralRateModelDG::Exporter::writeParticleFlux(double* buffer) const
+{
+	return 0;
+}
+
+int GeneralRateModelDG::Exporter::writeParticleFlux(unsigned int parType, double* buffer) const
+{
+	return 0;
+}
+
+int GeneralRateModelDG::Exporter::writeInlet(unsigned int port, double* buffer) const
+{
+	cadet_assert(port == 0);
+	std::copy_n(_data, _disc.nComp, buffer);
+	return _disc.nComp;
+}
+
+int GeneralRateModelDG::Exporter::writeInlet(double* buffer) const
+{
+	std::copy_n(_data, _disc.nComp, buffer);
+	return _disc.nComp;
+}
+
+int GeneralRateModelDG::Exporter::writeOutlet(unsigned int port, double* buffer) const
+{
+	cadet_assert(port == 0);
+
+	if (_model._convDispOpB.currentVelocity() >= 0)
+		std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
+	else
+		std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);
+
+	return _disc.nComp;
+}
+
+int GeneralRateModelDG::Exporter::writeOutlet(double* buffer) const
+{
+	if (_model._convDispOpB.currentVelocity() >= 0)
+		std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
+	else
+		std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);
+
+	return _disc.nComp;
+}
+
+}  // namespace model
+
+}  // namespace cadet
+
+#include "model/GeneralRateModelDG-InitialConditions.cpp"
+#include "model/GeneralRateModelDG-LinearSolver.cpp"
+
+namespace cadet
+{
+
+namespace model
+{
 
 void registerGeneralRateModelDG(std::unordered_map<std::string, std::function<IUnitOperation*(UnitOpIdx)>>& models)
 {
