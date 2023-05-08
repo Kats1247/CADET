@@ -9,9 +9,6 @@
 //  your option, any later version) which accompanies this distribution, and
 //  is available at http://www.gnu.org/licenses/gpl.html
 // =============================================================================
-//TODO: delete iostream, iomanip (debugging)
-#include <iostream>
-#include <iomanip>
 
 /**
  * @file 
@@ -64,7 +61,7 @@ namespace parts
 }
 
 class IDynamicReactionModel;
-class IParameterDependence;
+class IParameterStateDependence;
 
 /**
  * @brief General rate model of liquid column chromatography
@@ -85,7 +82,7 @@ u c_{\text{in},i}(t) &= u c_i(t,0) - D_{\text{ax},i} \frac{\partial c_i}{\partia
 \varepsilon_p D_{p,i} \frac{\partial c_{p,i}}{\partial r}(\cdot, \cdot, r_p) + (1-\varepsilon_p) D_{s,i} \frac{\partial q_{i}}{\partial r}(\cdot, \cdot, r_p) &= j_{f,i} \\
 \frac{\partial c_{p,i}}{\partial r}(\cdot, \cdot, 0) &= 0
 \end{align} @f]
- * Methods are described in @cite VonLieres2010a (WENO, linear solver), @cite Puttmann2013 @cite Puttmann2016 (forward sensitivities, AD, band compression)
+ * Methods are described in @cite todo, @cite Puttmann2013 @cite Puttmann2016 (forward sensitivities, AD, band compression)
  */
 class GeneralRateModelDG : public UnitOperationBase
 {
@@ -109,7 +106,7 @@ public:
 	static const char* identifier() { return "GENERAL_RATE_MODEL_DG"; }
 	virtual const char* unitOperationName() const CADET_NOEXCEPT { return identifier(); }
 
-	virtual bool configureModelDiscretization(IParameterProvider& paramProvider, IConfigHelper& helper);
+	virtual bool configureModelDiscretization(IParameterProvider& paramProvider, const IConfigHelper& helper);
 	virtual bool configure(IParameterProvider& paramProvider);
 	virtual void notifyDiscontinuousSectionTransition(double t, unsigned int secIdx, const ConstSimulationState& simState, const AdJacobianParams& adJac);
 
@@ -959,7 +956,7 @@ protected:
 	std::vector<bool> _hasSurfaceDiffusion; //!< Determines whether surface diffusion is present in each particle type
 //	IExternalFunction* _extFun; //!< External function (owned by library user)
 
-	parts::ConvectionDispersionOperatorBase _convDispOpB; //!< Convection dispersion operator base for interstitial volume transport
+	parts::AxialConvectionDispersionOperatorBase _convDispOpB; //!< Convection dispersion operator base for interstitial volume transport
 	IDynamicReactionModel* _dynReactionBulk; //!< Dynamic reactions in the bulk volume
 
 	Eigen::SparseLU<Eigen::SparseMatrix<double>> _globalSolver; //!< linear solver
@@ -992,7 +989,7 @@ protected:
 	MultiplexMode _parSurfDiffusionMode;
 	std::vector<active> _poreAccessFactor; //!< Pore accessibility factor \f$ F_{\text{acc}} \f$
 	MultiplexMode _poreAccessFactorMode;
-	std::vector<IParameterDependence*> _parDepSurfDiffusion; //!< Parameter dependencies for particle surface diffusion
+	std::vector<IParameterStateDependence*> _parDepSurfDiffusion; //!< Parameter dependencies for particle surface diffusion
 	bool _singleParDepSurfDiffusion; //!< Determines whether a single parameter dependence for particle surface diffusion is used
 	bool _hasParDepSurfDiffusion; //!< Determines whether particle surface diffusion parameter dependencies are present
 
@@ -1082,71 +1079,49 @@ protected:
 		virtual bool hasVolume() const CADET_NOEXCEPT { return false; }
 
 		virtual unsigned int numComponents() const CADET_NOEXCEPT { return _disc.nComp; }
-		// @TODO rename: numAxialCells, numRadialCells, numParticleShells -> Points !
-		virtual unsigned int numAxialCells() const CADET_NOEXCEPT { return _disc.nPoints; }
-		virtual unsigned int numRadialCells() const CADET_NOEXCEPT { return 0; }
+		virtual unsigned int numPrimaryCoordinates() const CADET_NOEXCEPT { return _disc.nPoints; }
+		virtual unsigned int numSecondaryCoordinates() const CADET_NOEXCEPT { return 0; }
 		virtual unsigned int numInletPorts() const CADET_NOEXCEPT { return 1; }
 		virtual unsigned int numOutletPorts() const CADET_NOEXCEPT { return 1; }
 		virtual unsigned int numParticleTypes() const CADET_NOEXCEPT { return _disc.nParType; }
 		virtual unsigned int numParticleShells(unsigned int parType) const CADET_NOEXCEPT { return _disc.nParPoints[parType]; } // todo rename to numParticlePoints
 		virtual unsigned int numBoundStates(unsigned int parType) const CADET_NOEXCEPT { return _disc.strideBound[parType]; }
-		virtual unsigned int numBulkDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints; }
+		virtual unsigned int numMobilePhaseDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints; }
+		virtual unsigned int numParticleMobilePhaseDofs() const CADET_NOEXCEPT
+		{
+			unsigned int nDofPerParType = 0;
+			for (unsigned int i = 0; i < _disc.nParType; ++i)
+				nDofPerParType += _disc.nParPoints[i];
+			return _disc.nPoints * nDofPerParType * _disc.nComp;
+		}
 		virtual unsigned int numParticleMobilePhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParPoints[parType] * _disc.nComp; }
+		virtual unsigned int numSolidPhaseDofs() const CADET_NOEXCEPT
+		{
+			unsigned int nDofPerParType = 0;
+			for (unsigned int i = 0; i < _disc.nParType; ++i)
+				nDofPerParType += _disc.nParPoints[i] * _disc.strideBound[i];
+			return _disc.nPoints * nDofPerParType;
+		}
 		virtual unsigned int numSolidPhaseDofs(unsigned int parType) const CADET_NOEXCEPT { return _disc.nPoints * _disc.nParPoints[parType] * _disc.strideBound[parType]; }
-		virtual unsigned int numFluxDofs() const CADET_NOEXCEPT { return _disc.nComp * _disc.nPoints * _disc.nParType; }
+		virtual unsigned int numParticleFluxDofs() const CADET_NOEXCEPT { return 0; }
 		virtual unsigned int numVolumeDofs() const CADET_NOEXCEPT { return 0; }
 
-		virtual double const* concentration() const { return _idx.c(_data); }
-		virtual double const* flux() const { return nullptr; }
-		virtual double const* particleMobilePhase(unsigned int parType) const { return _data + _idx.offsetCp(ParticleTypeIndex{parType}); }
-		virtual double const* solidPhase(unsigned int parType) const { return _data + _idx.offsetCp(ParticleTypeIndex{parType}) + _idx.strideParLiquid(); }
-		virtual double const* volume() const { return nullptr; }
-		virtual double const* inlet(unsigned int port, unsigned int& stride) const
-		{
-			stride = _idx.strideColComp();
-			return _data;
-		}
-		virtual double const* outlet(unsigned int port, unsigned int& stride) const
-		{
-			stride = _idx.strideColComp();
-			if (_model._convDispOpB.currentVelocity() >= 0)
-				return &_idx.c(_data, _disc.nPoints - 1, 0);
-			else
-				return &_idx.c(_data, 0, 0);
-		}
-
-		virtual StateOrdering const* concentrationOrdering(unsigned int& len) const
-		{
-			len = _concentrationOrdering.size();
-			return _concentrationOrdering.data();
-		}
-
-		virtual StateOrdering const* fluxOrdering(unsigned int& len) const
-		{
-			len = 0;
-			return nullptr;
-		}
-
-		virtual StateOrdering const* mobilePhaseOrdering(unsigned int& len) const
-		{
-			len = _particleOrdering.size();
-			return _particleOrdering.data();
-		}
-
-		virtual StateOrdering const* solidPhaseOrdering(unsigned int& len) const
-		{
-			len = _solidOrdering.size();
-			return _solidOrdering.data();
-		}
-
-		virtual unsigned int bulkMobilePhaseStride() const { return _idx.strideColNode(); }
-		virtual unsigned int particleMobilePhaseStride(unsigned int parType) const { return _idx.strideParNode(parType); }
-		virtual unsigned int solidPhaseStride(unsigned int parType) const { return _idx.strideParNode(parType); }
-
+		virtual int writeMobilePhase(double* buffer) const;
+		virtual int writeSolidPhase(double* buffer) const;
+		virtual int writeParticleMobilePhase(double* buffer) const;
+		virtual int writeSolidPhase(unsigned int parType, double* buffer) const;
+		virtual int writeParticleMobilePhase(unsigned int parType, double* buffer) const;
+		virtual int writeParticleFlux(double* buffer) const;
+		virtual int writeParticleFlux(unsigned int parType, double* buffer) const;
+		virtual int writeVolume(double* buffer) const { return 0; }
+		virtual int writeInlet(unsigned int port, double* buffer) const;
+		virtual int writeInlet(double* buffer) const;
+		virtual int writeOutlet(unsigned int port, double* buffer) const;
+		virtual int writeOutlet(double* buffer) const;
 		/**
-		* @brief calculates the physical axial/column coordinates of the DG discretization with double! interface nodes
+		* @brief calculates, writes the physical axial/column coordinates of the DG discretization with double! interface nodes
 		*/
-		virtual void axialCoordinates(double* coords) const {
+		virtual int writePrimaryCoordinates(double* coords) const {
 			Eigen::VectorXd x_l = Eigen::VectorXd::LinSpaced(static_cast<int>(_disc.nCol + 1), 0.0, _disc.colLength);
 			for (unsigned int i = 0; i < _disc.nCol; i++) {
 				for (unsigned int j = 0; j < _disc.nNodes; j++) {
@@ -1154,12 +1129,14 @@ protected:
 					coords[i * _disc.nNodes + j] = x_l[i] + 0.5 * (_disc.colLength / static_cast<double>(_disc.nCol)) * (1.0 + _disc.nodes[j]);
 				}
 			}
+
+			return _disc.nPoints;
 		}
-		virtual void radialCoordinates(double* coords) const { }
+		virtual int writeSecondaryCoordinates(double* coords) const { return 0; }
 		/**
-		* @brief calculates the physical radial/particle coordinates of the DG discretization with double! interface nodes
+		* @brief calculates, writes the physical radial/particle coordinates of the DG discretization with double! interface nodes
 		*/
-		virtual void particleCoordinates(unsigned int parType, double* coords) const
+		virtual int writeParticleCoordinates(unsigned int parType, double* coords) const
 		{
 			active const* const pcr = _model._parCenterRadius.data() + _disc.offsetMetric[parType];
 
@@ -1171,6 +1148,8 @@ protected:
 				double r_L = static_cast<double>(pcr[cell]) - 0.5 * _disc.deltaR[_disc.offsetMetric[parType] + cell];
 				coords[par] = r_L + 0.5 * _disc.deltaR[_disc.offsetMetric[parType] + cell] * (1.0 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);
 			}
+
+			return _disc.nParPoints[parType];
 		}
 
 	protected:
@@ -1178,10 +1157,6 @@ protected:
 		const Indexer _idx;
 		const GeneralRateModelDG& _model;
 		double const* const _data;
-
-		const std::array<StateOrdering, 2> _concentrationOrdering = { { StateOrdering::AxialCell, StateOrdering::Component } };
-		const std::array<StateOrdering, 4> _particleOrdering = { { StateOrdering::ParticleType, StateOrdering::AxialCell, StateOrdering::ParticleShell, StateOrdering::Component } };
-		const std::array<StateOrdering, 5> _solidOrdering = { { StateOrdering::ParticleType, StateOrdering::AxialCell, StateOrdering::ParticleShell, StateOrdering::Component, StateOrdering::BoundState } };
 	};
 
 	/**
