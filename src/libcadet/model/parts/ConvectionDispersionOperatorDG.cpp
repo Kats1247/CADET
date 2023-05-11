@@ -388,23 +388,31 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 {
 	for (unsigned int comp = 0; comp < _nComp; comp++) {
 
-		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
-
-		const ParamType u = static_cast<ParamType>(_curVelocity);
-		const ParamType d_ax = static_cast<ParamType>(getSectionDependentSlice(_colDispersion, _nComp, secIdx)[comp]);
-
+		// create Eigen objects
 		Eigen::Map<const Vector<StateType, Dynamic>, 0, InnerStride<Dynamic>> _C(y + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<Dynamic>> _resC(res + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<>> _h(reinterpret_cast<ResidualType*>(&_h[0]), _nPoints, InnerStride<>(1));
 		Eigen::Map<Vector<StateType, Dynamic>, 0, InnerStride<>> _g(reinterpret_cast<StateType*>(&_g[0]), _nPoints, InnerStride<>(1));
 
+		// Add time derivative to bulk residual
+		if (yDot)
+		{
+			Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _Cdot(yDot + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
+			_resC = _Cdot.cast<ResidualType>();
+		}
+		else
+			_resC.setZero();
+
+		const ParamType u = static_cast<ParamType>(_curVelocity);
+		const ParamType d_ax = static_cast<ParamType>(getSectionDependentSlice(_colDispersion, _nComp, secIdx)[comp]);
+
 		// ===================================//
 		// reset cache                        //
 		// ===================================//
 
-		_resC.setZero(); // todo: currently required because volumeIntegrl: res -= ..., but could be res = -...
 		_h.setZero();
 		_g.setZero();
+		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
 
 		// ======================================//
 		// solve auxiliary system g = d c / d x  //
@@ -424,8 +432,8 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// solve main equation RHS  d h / d x    //
 		// ======================================//
 
-		// calculate the substitute h(g(c), c) = - (D_ax J^-1 g - v c)
-		_h = (u * _C - d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).cast<ResidualType>();
+		// calculate the substitute h(g(c), c) and  apply inverse mapping jacobian (reference space)
+		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).cast<ResidualType>();
 
 		// DG volume integral in strong form
 		volumeIntegral<ResidualType, ResidualType>(_h, _resC);
@@ -435,13 +443,11 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 
 		// calculate numerical flux values h*
 		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
+		_surfaceFlux *= -2.0 / static_cast<ParamType>(_deltaZ);
 
 		// DG surface integral in strong form
 		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
 			1u, _nNodes, _strideNode, _strideCell);
-
-		// apply inverse mapping jacobian (reference space)
-		_resC *= (2.0 / static_cast<ParamType>(_deltaZ));
 	}
 
 //	convdisp::AxialFlowParameters<ParamType> fp{
