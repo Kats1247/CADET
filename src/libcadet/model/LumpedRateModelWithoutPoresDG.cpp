@@ -609,9 +609,10 @@ namespace cadet
 
 			}
 
-			// ==========================================//
-			// Estimate binding, reactions Residual		 //
-			// ==========================================//
+			/*	Compute bulk convection dispersion residual	*/
+			_convDispOp.residual(*this, t, secIdx, y_, yDot_, res_, typename cadet::ParamSens<ParamType>::enabled());
+
+			/* Compute binding, reaction residual */
 
 #ifdef CADET_PARALLELIZE
 			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t blk)
@@ -645,42 +646,6 @@ namespace cadet
 					);
 
 			} CADET_PARFOR_END;
-
-			// ==================================================//
-			//	Estimate Convection Dispersion residual			//
-			// ================================================//
-
-			/*	convection dispersion RHS	*/
-			_convDispOp.residual(*this, t, secIdx, y_, yDot_, res_, typename cadet::ParamSens<ParamType>::enabled());
-
-			/*	residual	*/
-			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-
-				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
-
-				// Eigen access to current component mobile phase (discontinuous memory blocks)
-				Eigen::Map<Vector<ResidualType, Eigen::Dynamic>, 0, InnerStride<Dynamic>> cRes_comp(res_ + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
-				if (yDot_) { // NULLpointer for consistent initialization
-
-					Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cDot_comp(yDot_ + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-					if (_disc.nBound[comp]) {
-						Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> qDot_comp(yDot_ + idxr.offsetC() + idxr.strideColLiquid() + idxr.offsetBoundComp(comp), _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
-						if constexpr (std::is_same_v<ResidualType, double>)
-							cRes_comp = cDot_comp + qDot_comp * ((1 - static_cast<double>(_totalPorosity)) / static_cast<double>(_totalPorosity)) - cRes_comp;
-						else
-							cRes_comp = cDot_comp.cast<ResidualType>() + qDot_comp.cast<ResidualType>() * ((1 - static_cast<ParamType>(_totalPorosity)) / static_cast<ParamType>(_totalPorosity)) - cRes_comp;
-					}
-					else
-						if constexpr (std::is_same_v<ResidualType, double>)
-							cRes_comp = cDot_comp - cRes_comp;
-						else
-							cRes_comp = cDot_comp.cast<ResidualType>() - cRes_comp;
-				}
-				else
-					cRes_comp *= -1.0;
-			}
 
 			return 0;
 		}
@@ -919,7 +884,7 @@ namespace cadet
 			//std::cout << "inlet analytical: " << std::endl;
 			//std::cout << _jacInlet << std::endl;
 			//std::cout << "inlet FDjac: " << std::endl;
-			//if(_disc.velocity < 0.0)
+			//if(_convDispOp.forwardFlow())
 			//	std::cout << FDjac.block(numDofs() - _disc.nNodes * idxr.strideColNode() - 1, 0, _disc.nNodes * idxr.strideColNode(), _disc.nComp) << std::endl;
 			//else
 			//	std::cout << FDjac.block(_disc.nComp, 0, _disc.nNodes * idxr.strideColNode(), _disc.nComp) << std::endl;
