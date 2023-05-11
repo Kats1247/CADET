@@ -103,15 +103,18 @@ namespace cadet
 
 			paramProvider.pushScope("discretization");
 
-			if (paramProvider.getInt("NCOL") < 1)
-				throw InvalidParameterException("Number of column cells must be at least 1!");
-			_disc.nCol = paramProvider.getInt("NCOL");
+			_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 			if (paramProvider.getInt("POLYDEG") < 1)
 				throw InvalidParameterException("Polynomial degree must be at least 1!");
 			_disc.polyDeg = paramProvider.getInt("POLYDEG");
+			_disc.nNodes = _disc.polyDeg + 1u;
 
-			_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
+			if (paramProvider.getInt("NCOL") < 1)
+				throw InvalidParameterException("Number of column cells must be at least 1!");
+			_disc.nCol = paramProvider.getInt("NCOL");
+
+			_disc.nPoints = _disc.nNodes * _disc.nCol;
 
 			const std::vector<int> nBound = paramProvider.getIntArray("NBOUND");
 			if (nBound.size() < _disc.nComp)
@@ -119,9 +122,6 @@ namespace cadet
 
 			_disc.nBound = new unsigned int[_disc.nComp];
 			std::copy_n(nBound.begin(), _disc.nComp, _disc.nBound);
-
-			// Compute discretization
-			_disc.initializeDG();
 
 			// Precompute offsets and total number of bound states (DOFs in solid phase)
 			_disc.boundOffset = new unsigned int[_disc.nComp];
@@ -149,18 +149,11 @@ namespace cadet
 
 			paramProvider.popScope();
 
-			const unsigned int strideCell = _disc.nNodes;
+			const unsigned int strideNode = _disc.nComp + _disc.strideBound;
 
-			const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.nCol, strideCell);
+			const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.exactInt, _disc.nCol, _disc.polyDeg, strideNode);
 
-			_disc.dispersion = new active[_disc.nComp]; // fill later on with convDispOp (section and component dependent)
-
-			_disc.velocity = static_cast<double>(_convDispOp.currentVelocity()); // updated later on with convDispOp (section dependent)
 			_disc.curSection = -1;
-
-			_disc.length_ = paramProvider.getDouble("COL_LENGTH");
-
-			_disc.deltaZ = _disc.length_ / _disc.nCol;
 
 			// Allocate memory
 			Indexer idxr(_disc);
@@ -346,32 +339,14 @@ namespace cadet
 			Indexer idxr(_disc);
 
 			// ConvectionDispersionOperator tells us whether flow direction has changed
-			if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx) && (secIdx != 0)) {
+			if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx, _jacInlet) && (secIdx != 0)) {
 				// (re)compute DG Jaconian blocks
 				updateSection(secIdx);
-				_disc.initializeDGjac();
 				return;
 			}
 			else {
 				// (re)compute DG Jaconian blocks
 				updateSection(secIdx);
-				_disc.initializeDGjac();
-			}
-
-			// Setup the matrix connecting inlet DOFs to first column cells
-			const double u = static_cast<double>(_convDispOp.currentVelocity());
-
-			if (u >= 0.0) { // forward flow upwind convection
-				if(_disc.exactInt)
-					_jacInlet = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock.col(0); // only first cell depends on inlet concentration
-				else
-					_jacInlet(0, 0) = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock(0, 0); // only first node depends on inlet concentration
-			}
-			else {  // backward flow upwind convection
-				if (_disc.exactInt)
-					_jacInlet = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock.col(_disc.DGjacAxConvBlock.cols() - 1); // only last cell depends on inlet concentration
-				else
-					_jacInlet(0, 0) = static_cast<double>(_disc.velocity) * _disc.DGjacAxConvBlock(_disc.DGjacAxConvBlock.rows() - 1, _disc.DGjacAxConvBlock.cols() - 1); // only last node depends on inlet concentration
 			}
 
 			prepareADvectors(adJac);
@@ -623,7 +598,8 @@ namespace cadet
 					// TODO: reset pattern every time section?
 					//setPattern(_jacDisc, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
 					//setPattern(_jac, true, _dynReaction[0] && (_dynReaction[0]->numReactionsCombined() > 0));
-					success = calcStaticAnaJacobian();
+					//success = calcStaticAnaJacobian();
+					success = _convDispOp.calcStaticAnaJacobian(_jac, _jacInlet);
 
 					_disc.newStaticJac = false;
 				}
@@ -662,7 +638,7 @@ namespace cadet
 				};
 
 				// position of current column node (z coordinate) - needed in externally dependent adsorption kinetic
-				double z = static_cast<double>(_disc.deltaZ) * std::floor(blk / _disc.nNodes) + 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[blk % _disc.nNodes]);
+				double z = _convDispOp.relativeCoordinate(blk);
 
 				parts::cell::residualKernel<StateType, ResidualType, ParamType, parts::cell::CellParameters, linalg::BandedEigenSparseRowIterator, wantJac, false>(
 					t, secIdx, ColumnPosition{ z, 0.0, 0.0 }, localY, localYdot, localRes, jacIt, cellResParams, threadLocalMem.get()
@@ -674,15 +650,11 @@ namespace cadet
 			//	Estimate Convection Dispersion residual			//
 			// ================================================//
 
+			/*	convection dispersion RHS	*/
+			_convDispOp.residual(*this, t, secIdx, y_, yDot_, res_, typename cadet::ParamSens<ParamType>::enabled());
+
+			/*	residual	*/
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-
-				/*	convection dispersion RHS	*/
-
-				_disc.boundary[0] = y_[comp]; // copy inlet DOFs to ghost node
-
-				ConvDisp_DG<StateType, ResidualType, ParamType>(y_, res_, t, comp);
-
-				/*	residual	*/
 
 				res_[comp] = y_[comp]; // simply copy the inlet DOFs to the residual (handled in inlet unit operation)
 
@@ -799,7 +771,7 @@ namespace cadet
 
 			// Map inlet DOFs to the column inlet (first bulk cells)
 			// Inlet at z = 0 for forward flow, at z = L for backward flow.
-			unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+			unsigned int offInlet = _convDispOp.forwardFlow() ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
 
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 				for (unsigned int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
@@ -822,21 +794,7 @@ namespace cadet
 			Indexer idxr(_disc);
 			const double invBeta = (1.0 / static_cast<double>(_totalPorosity) - 1.0);
 			
-			// todo: use DGConvDispOp to call multiplyWithDerivativeJacobian, FV operator uses nCol and strideCol
-			//_convDispOp.multiplyWithDerivativeJacobian(simTime, sDot, ret);
-			// begin multiplyWithDerivativeJacobian DG
-			double* localRet = ret + idxr.offsetC();
-			double const* localSdot = sDot + idxr.offsetC();
-			const int gapCell = idxr.strideColNode() - static_cast<int>(_disc.nComp) * idxr.strideColComp();
-
-			for (unsigned int i = 0; i < _disc.nPoints; ++i, localRet += gapCell, localSdot += gapCell)
-			{
-				for (unsigned int j = 0; j < _disc.nComp; ++j, ++localRet, ++localSdot)
-				{
-					*localRet = (*localSdot);
-				}
-			}
-			// end multiplyWithDerivativeJacobian DG
+			_convDispOp.multiplyWithDerivativeJacobian(simTime, sDot, ret);
 
 			for (unsigned int node = 0; node < _disc.nPoints; ++node)
 			{
@@ -990,7 +948,7 @@ namespace cadet
 
 			// Handle inlet DOFs:
 			// Inlet at z = 0 for forward flow, at z = L for backward flow.
-			unsigned int offInlet = (_disc.velocity >= 0.0) ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
+			unsigned int offInlet = _convDispOp.forwardFlow() ? 0 : (_disc.nCol - 1u) * idxr.strideColCell();
 
 			for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
 				for (unsigned int node = 0; node < (_disc.exactInt ? _disc.nNodes : 1); node++) {
@@ -1022,10 +980,17 @@ namespace cadet
 			// set to static jacobian entries
 			_jacDisc = _jac;
 
-			// add time derivative jacobian entries
-			addTimederJacobian(alpha);
-		}
+			// add time derivative jacobian entries (dc_b / dt terms)
+			_convDispOp.addTimeDerivativeToJacobian(alpha, _jacDisc);
 
+			// add time derivative jacobian entries (dc_s / dt terms)
+			const double invBeta = 1.0 / static_cast<double>(_totalPorosity) - 1.0;
+			linalg::BandedEigenSparseRowIterator jac(_jacDisc, 0);
+			for (unsigned int j = 0; j < _disc.nPoints; ++j)
+			{
+				addTimeDerivativeToJacobianNode(jac, idxr, alpha, invBeta);
+			}
+		}
 		/**
 		 * @brief Adds Jacobian @f$ \frac{\partial F}{\partial \dot{y}} @f$ to cell of system Jacobian
 		 * @details Actually adds @f$ \alpha \frac{\partial F}{\partial \dot{y}} @f$, which is useful
@@ -1038,7 +1003,6 @@ namespace cadet
 		 */
 		void LumpedRateModelWithoutPoresDG::addTimeDerivativeToJacobianNode(linalg::BandedEigenSparseRowIterator& jac, const Indexer& idxr, double alpha, double invBeta) const
 		{
-
 			// Mobile phase
 			for (int comp = 0; comp < static_cast<int>(_disc.nComp); ++comp, ++jac)
 			{
@@ -1220,8 +1184,7 @@ namespace cadet
 				linalg::DenseMatrixView fullJacobianMatrix(_jacDisc.valuePtr() + point * _disc.strideBound * _disc.strideBound, nullptr, mask.len, mask.len);
 
 				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-				const double z = (static_cast<double>(_disc.deltaZ) * std::floor(point / _disc.nNodes)
-					+ 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[point % _disc.nNodes])) / static_cast<double>(_disc.length_);
+				const double z = _convDispOp.relativeCoordinate(point);
 
 				// Get workspace memory
 				BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -1457,7 +1420,7 @@ namespace cadet
 					continue;
 
 				// Midpoint of current column node (z coordinate) - needed in externally dependent adsorption kinetic
-				double z = static_cast<double>(_disc.deltaZ) * std::floor(col / _disc.nNodes) + 0.5 * static_cast<double>(_disc.deltaZ) * (1 + _disc.nodes[col % _disc.nNodes]);
+				double z = _convDispOp.relativeCoordinate(col);
 
 				// Get iterators to beginning of solid phase
 				linalg::BandedEigenSparseRowIterator jacSolidOrig(_jac, idxr.strideColNode() * col + idxr.strideColLiquid());
