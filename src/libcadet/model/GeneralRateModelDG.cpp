@@ -27,13 +27,9 @@
 #include "model/ParameterDependence.hpp"
 #include "model/parts/BindingCellKernel.hpp"
 #include "SimulationTypes.hpp"
-#include "linalg/DenseMatrix.hpp"
-#include "linalg/BandMatrix.hpp"
 #include "linalg/Norms.hpp"
 #include "linalg/Subset.hpp"
 
-#include "Stencil.hpp"
-#include "Weno.hpp"
 #include "AdUtils.hpp"
 #include "SensParamUtil.hpp"
 
@@ -152,7 +148,8 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 
 	if (_disc.polyDeg < 3)
 		LOG(Warning) << "Polynomial degree > 2 in bulk discretization (cf. POLYDEG) is always recommended for performance reasons.";
-
+	_disc.nNodes = _disc.polyDeg + 1u;
+	_disc.nPoints = _disc.nNodes * _disc.nCol;
 	_disc.exactInt = paramProvider.getBool("EXACT_INTEGRATION");
 
 	const std::vector<int> nParCell = paramProvider.getIntArray("NPARCELL");
@@ -454,15 +451,10 @@ bool GeneralRateModelDG::configureModelDiscretization(IParameterProvider& paramP
 		_hasSurfaceDiffusion = std::vector<bool>(_disc.nParType, true);
 	}
 
-	const bool transportSuccess = _convDispOpB.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.nPoints, 0); // strideCell not needed for DG, so just set to zero
+	unsigned int strideColNode = _disc.nComp;
+	const bool transportSuccess = _convDispOp.configureModelDiscretization(paramProvider, helper, _disc.nComp, _disc.exactInt, _disc.nCol, _disc.polyDeg, strideColNode);
 
-	_disc.dispersion = Eigen::VectorXd::Zero(_disc.nComp); // fill later on with convDispOpB (section and component dependent)
-
-	_disc.velocity = static_cast<double>(_convDispOpB.currentVelocity()); // updated later on (section dependent)
 	_disc.curSection = -1;
-
-	_disc.colLength = paramProvider.getDouble("COL_LENGTH");
-	_disc.deltaZ = _disc.colLength / _disc.nCol;
 
 	// ==== Construct and configure binding model
 	clearBindingModels();
@@ -587,7 +579,7 @@ bool GeneralRateModelDG::configure(IParameterProvider& paramProvider)
 {
 	_parameters.clear();
 
-	const bool transportSuccess = _convDispOpB.configure(_unitOpIdx, paramProvider, _parameters);
+	const bool transportSuccess = _convDispOp.configure(_unitOpIdx, paramProvider, _parameters);
 
 	// Read geometry parameters
 	_colPorosity = paramProvider.getDouble("COL_POROSITY");
@@ -901,46 +893,22 @@ void GeneralRateModelDG::notifyDiscontinuousSectionTransition(double t, unsigned
 	_globalJacDisc = _globalJac;
 
 	// ConvectionDispersionOperator tells us whether flow direction has changed
-	if (!_convDispOpB.notifyDiscontinuousSectionTransition(t, secIdx)) {
-		// (re)compute DG Jaconian blocks (can only be done after notify)
+	if (!_convDispOp.notifyDiscontinuousSectionTransition(t, secIdx, _jacInlet)) {
+		// (re)compute DG particle Jacobian blocks (can only be done after notify)
 		updateSection(secIdx);
 		_disc.initializeDGjac(_parGeomSurfToVol);
 		return;
 	}
 	else {
-		// (re)compute DG Jacobian blocks
+		// (re)compute DG particle Jacobian blocks
 		updateSection(secIdx);
 		_disc.initializeDGjac(_parGeomSurfToVol);
 	}
-
-	// @TODO: backwards flow
-	//// Setup the matrix connecting inlet DOFs to first column cells
-	//_jacInlet.clear();
-	//const double h = static_cast<double>(_convDispOpB.columnLength()) / static_cast<double>(_disc.nPoints);
-	//const double u = static_cast<double>(_convDispOpB.currentVelocity());
-
-	//if (u >= 0.0)
-	//{
-	//	// Forwards flow
-
-	//	// Place entries for inlet DOF to first column cell conversion
-	//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-	//		_jacInlet.addElement(comp * idxr.strideColComp(), comp, -u / h);
-	//}
-	//else
-	//{
-	//	// Backwards flow
-
-	//	// Place entries for inlet DOF to last column cell conversion
-	//	const unsigned int offset = (_disc.nPoints - 1) * idxr.strideColNode();
-	//	for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-	//		_jacInlet.addElement(offset + comp * idxr.strideColComp(), comp, u / h);
-	//}
 }
 
 void GeneralRateModelDG::setFlowRates(active const* in, active const* out) CADET_NOEXCEPT
 {
-	_convDispOpB.setFlowRates(in[0], out[0], _colPorosity);
+	_convDispOp.setFlowRates(in[0], out[0], _colPorosity);
 }
 
 void GeneralRateModelDG::reportSolution(ISolutionRecorder& recorder, double const* const solution) const
@@ -1229,33 +1197,12 @@ int GeneralRateModelDG::residualImpl(double t, unsigned int secIdx, StateType co
 template <typename StateType, typename ResidualType, typename ParamType, bool wantJac>
 int GeneralRateModelDG::residualBulk(double t, unsigned int secIdx, StateType const* yBase, double const* yDotBase, ResidualType* resBase, util::ThreadLocalStorage& threadLocalMem)
 {
-	Indexer idxr(_disc);
-
-	// Eigen access to data pointers
-	const double* yPtr = reinterpret_cast<const double*>(yBase);
-	const double* const ypPtr = reinterpret_cast<const double* const>(yDotBase);
-	double* const resPtr = reinterpret_cast<double* const>(resBase);
-
-	for (unsigned int comp = 0; comp < _disc.nComp; comp++) {
-
-		// extract current component mobile phase, mobile phase residual, mobile phase derivative (discontinous memory blocks)
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> cl_comp(yPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-		Eigen::Map<VectorXd, 0, InnerStride<Dynamic>>		clRes_comp(resPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-		Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> clDot_comp(ypPtr + idxr.offsetC() + comp, _disc.nPoints, InnerStride<Dynamic>(idxr.strideColNode()));
-
-		/*	convection dispersion RHS	*/
-
-		_disc.boundary[0] = yPtr[comp]; // copy inlet DOFs to ghost node
-		ConvDisp_DG(cl_comp, clRes_comp, t, comp);
-
-		/*	residual	*/
-
-		if (ypPtr) // NULLpointer for consistent initialization
-			clRes_comp = clDot_comp - clRes_comp;
-	}
+	_convDispOp.residual(*this, t, secIdx, yBase, yDotBase, resBase, typename cadet::ParamSens<ParamType>::enabled());
 
 	if (!_dynReactionBulk || (_dynReactionBulk->numReactionsLiquid() == 0))
 		return 0;
+
+	Indexer idxr(_disc);
 
 	// Dynamic reactions
 	if (_dynReactionBulk) {
@@ -1300,8 +1247,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 	active const* const _parSurfDiff = getSectionDependentSlice(_parSurfDiffusion, _disc.strideBound[_disc.nParType], secIdx) + _disc.nBoundBeforeType[parType];
 
 	// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-	const double z = (_disc.deltaZ * std::floor(colNode / _disc.nNodes)
-		+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[colNode % _disc.nNodes])) / _disc.colLength;
+	const double z = _convDispOp.relativeCoordinate(colNode);
 
 	// The RowIterator is always centered on the main diagonal.
 	// This means that jac[0] is the main diagonal, jac[-1] is the first lower diagonal,
@@ -1649,7 +1595,7 @@ void GeneralRateModelDG::setExternalFunctions(IExternalFunction** extFuns, unsig
 unsigned int GeneralRateModelDG::localOutletComponentIndex(unsigned int port) const CADET_NOEXCEPT
 {
 	// Inlets are duplicated so need to be accounted for
-	if (static_cast<double>(_convDispOpB.currentVelocity()) >= 0.0)
+	if (_convDispOp.forwardFlow())
 		// Forward Flow: outlet is last cell
 		return _disc.nComp + (_disc.nPoints - 1) * _disc.nComp;
 	else
@@ -2022,7 +1968,7 @@ bool GeneralRateModelDG::setParameter(const ParameterId& pId, double value)
 		if (model::setParameter(pId, value, _parDepSurfDiffusion, _singleParDepSurfDiffusion))
 			return true;
 
-		if (_convDispOpB.setParameter(pId, value))
+		if (_convDispOp.setParameter(pId, value))
 			return true;
 	}
 
@@ -2099,7 +2045,7 @@ void GeneralRateModelDG::setSensitiveParameterValue(const ParameterId& pId, doub
 		if (model::setSensitiveParameterValue(pId, value, _sensParams, _parDepSurfDiffusion, _singleParDepSurfDiffusion))
 			return;
 
-		if (_convDispOpB.setSensitiveParameterValue(_sensParams, pId, value))
+		if (_convDispOp.setSensitiveParameterValue(_sensParams, pId, value))
 			return;
 	}
 
@@ -2189,7 +2135,7 @@ bool GeneralRateModelDG::setSensitiveParameter(const ParameterId& pId, unsigned 
 			return true;
 		}
 
-		if (_convDispOpB.setSensitiveParameter(_sensParams, pId, adDirection, adValue))
+		if (_convDispOp.setSensitiveParameter(_sensParams, pId, adDirection, adValue))
 		{
 			LOG(Debug) << "Found parameter " << pId << ": Dir " << adDirection << " is set to " << adValue;
 			return true;
@@ -2327,7 +2273,7 @@ int GeneralRateModelDG::Exporter::writeOutlet(unsigned int port, double* buffer)
 {
 	cadet_assert(port == 0);
 
-	if (_model._convDispOpB.currentVelocity() >= 0)
+	if (_model._convDispOp.forwardFlow())
 		std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
 	else
 		std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);
@@ -2337,7 +2283,7 @@ int GeneralRateModelDG::Exporter::writeOutlet(unsigned int port, double* buffer)
 
 int GeneralRateModelDG::Exporter::writeOutlet(double* buffer) const
 {
-	if (_model._convDispOpB.currentVelocity() >= 0)
+	if (_model._convDispOp.forwardFlow())
 		std::copy_n(&_idx.c(_data, _disc.nPoints - 1, 0), _disc.nComp, buffer);
 	else
 		std::copy_n(&_idx.c(_data, 0, 0), _disc.nComp, buffer);

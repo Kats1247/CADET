@@ -94,9 +94,9 @@ public:
 	int residual(const IModel& model, double t, unsigned int secIdx, active const* y, double const* yDot, active* res, WithParamSensitivity);
 	int residual(const IModel& model, double t, unsigned int secIdx, active const* y, double const* yDot, active* res, WithoutParamSensitivity);
 
-	int calcStaticAnaJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet);
+	int calcStaticAnaJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet, const int bulkOffset = 0);
 	typedef Eigen::Triplet<double> T;
-	void convDispJacPattern(std::vector<T>& tripletList);
+	void convDispJacPattern(std::vector<T>& tripletList, const int bulkOffset = 0);
 	unsigned int AxialConvectionDispersionOperatorBaseDG::nConvDispEntries(bool pureNNZ = false);
 	void multiplyWithDerivativeJacobian(const SimulationTime& simTime, double const* sDot, double* ret) const;
 	void addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc);
@@ -761,9 +761,7 @@ protected:
 	/**
 	 * @brief sets the sparsity pattern of the convection dispersion Jacobian for the nodal DG scheme
 	 */
-	int ConvDispNodalPattern(std::vector<T>& tripletList) {
-
-		int offC = 0; // inlet DOFs not included in Jacobian
+	int ConvDispNodalPattern(std::vector<T>& tripletList, const int offC = 0) {
 
 		/*======================================================*/
 		/*			Define Convection Jacobian Block			*/
@@ -891,9 +889,7 @@ protected:
 	/**
 	* @brief sets the sparsity pattern of the convection dispersion Jacobian for the exact integration (her: modal) DG scheme
 	*/
-	int ConvDispModalPattern(std::vector<T>& tripletList) {
-
-		int offC = 0; // inlet DOFs not included in Jacobian
+	int ConvDispModalPattern(std::vector<T>& tripletList, const int offC = 0) {
 
 		/*======================================================*/
 		/*			Define Convection Jacobian Block			*/
@@ -1068,9 +1064,8 @@ protected:
 	/**
 	* @brief analytically calculates the convection dispersion jacobian for the nodal DG scheme
 	*/
-	int calcConvDispCollocationDGSEMJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet) {
+	int calcConvDispCollocationDGSEMJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet, const int offC = 0) {
 
-		const int offC = 0; // inlet DOFs not included in Jacobian
 		const int strideColBound = strideColNode() - _nComp;
 
 		/*======================================================*/
@@ -1263,9 +1258,7 @@ protected:
 	/**
 	 * @brief analytically calculates the convection dispersion jacobian for the exact integration (here: modal) DG scheme
 	 */
-	int calcConvDispDGSEMJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet) {
-
-		int offC = 0; // inlet DOFs not included in Jacobian
+	int calcConvDispDGSEMJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet, const int offC = 0) {
 
 		/*======================================================*/
 		/*			Compute Dispersion Jacobian Block			*/

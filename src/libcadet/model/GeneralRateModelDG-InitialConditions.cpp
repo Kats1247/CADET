@@ -14,8 +14,6 @@
 
 #include "model/GeneralRateModelDG.hpp"
 #include "model/BindingModel.hpp"
-#include "linalg/DenseMatrix.hpp"
-#include "linalg/BandMatrix.hpp"
 #include "linalg/Subset.hpp"
 #include "ParamReaderHelper.hpp"
 #include "AdUtils.hpp"
@@ -366,8 +364,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			linalg::DenseMatrixView fullJacobianMatrix(_globalJacDisc.valuePtr() + _globalJacDisc.outerIndexPtr()[idxr.offsetCp(ParticleTypeIndex{ type }) + pblk], nullptr, mask.len, mask.len);
 
 			// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-			const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-				+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.colLength;
+			const double z = _convDispOp.relativeCoordinate(pblk);
 
 			// Get workspace memory
 			BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -674,7 +671,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 	// Note that the residual has not been negated, yet. We will do that now.
 	for (unsigned int i = 0; i < numDofs(); ++i)
 		vecStateYdot[i] = -vecStateYdot[i];
-	
+
 	// bulk column block: dc/dt = rhs = residual(with dc/dt=nullptr)
 	linalg::BandedEigenSparseRowIterator jacBlk(_globalJacDisc, idxr.offsetC());
 	for (unsigned int blk = 0; blk < _disc.nPoints * _disc.nComp; blk++, ++jacBlk)
@@ -692,8 +689,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 		unsigned int par = pblk % _disc.nPoints;
 
 		// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-		const double z = (_disc.deltaZ * std::floor(par / _disc.nNodes)
-			+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[par % _disc.nNodes])) / _disc.colLength;
+		const double z = _convDispOp.relativeCoordinate(pblk);
 
 		// Assemble
 		linalg::BandedEigenSparseRowIterator jacPar(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }));
@@ -744,24 +740,19 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 	BENCH_STOP(_timerConsistentInitPar);
 #endif
 
-		// todo ? Precondition
-		//double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
-		//fbm.rowScaleFactors(scaleFactors);
-		//fbm.scaleRows(scaleFactors);
+	// Factorize
+	_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
+	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+	{
+		LOG(Error) << "Factorize() failed";
+	}
 
-		// Factorize
-		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
-		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
-		{
-			LOG(Error) << "Factorize() failed";
-		}
-
-		// Solve
-		yDot.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(yDot.segment(idxr.offsetC(), numPureDofs()));
-		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
-		{
-			LOG(Error) << "Solve() failed";
-		}
+	// Solve
+	yDot.segment(idxr.offsetC(), numPureDofs()) = _globalSolver.solve(yDot.segment(idxr.offsetC(), numPureDofs()));
+	if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+	{
+		LOG(Error) << "Solve() failed";
+	}
 
 }
 
@@ -836,8 +827,7 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 				LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
 				// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-				const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-					+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.colLength;
+				const double z = _convDispOp.relativeCoordinate(pblk);
 
 				const int localOffsetToParticle = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
 				for (std::size_t shell = 0; shell < static_cast<std::size_t>(_disc.nParPoints[type]); ++shell)
