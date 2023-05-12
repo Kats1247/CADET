@@ -12,8 +12,6 @@
 
 #include "model/LumpedRateModelWithPoresDG.hpp"
 #include "model/BindingModel.hpp"
-#include "linalg/DenseMatrix.hpp"
-#include "linalg/BandMatrix.hpp"
 #include "ParamReaderHelper.hpp"
 #include "AdUtils.hpp"
 #include "model/parts/BindingCellKernel.hpp"
@@ -350,8 +348,7 @@ namespace cadet
 					linalg::DenseMatrixView fullJacobianMatrix(_globalJacDisc.valuePtr() + _globalJacDisc.outerIndexPtr()[idxr.offsetCp(ParticleTypeIndex{ type }) - idxr.offsetC() + pblk], nullptr, mask.len, mask.len);
 
 					// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-					const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-						+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
+					const double z = _convDispOp.relativeCoordinate(pblk);
 
 					// Get workspace memory
 					BufferedArray<double> nonlinMemBuffer = tlmAlloc.array<double>(_nonlinearSolver->workspaceSize(probSize));
@@ -664,7 +661,7 @@ namespace cadet
 			for (int k = 0; k < _globalJacDisc.nonZeros(); k++) {
 				vPtr[k] = 0.0;
 			}
-			addTimeDerBulkJacobian(1.0, idxr);
+			_convDispOp.addTimeDerivativeToJacobian(1.0, _globalJacDisc);
 
 			// Process the particle blocks
 #ifdef CADET_PARALLELIZE
@@ -680,8 +677,7 @@ namespace cadet
 				for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
 				{
 					// z coordinate (column length normed to 1) of current node - needed in externally dependent adsorption kinetic
-					const double z = (_disc.deltaZ * std::floor(pblk / _disc.nNodes)
-						+ 0.5 * _disc.deltaZ * (1 + _disc.nodes[pblk % _disc.nNodes])) / _disc.length_;
+					const double z = _convDispOp.relativeCoordinate(pblk);
 
 					// Assemble
 					linalg::BandedEigenSparseRowIterator jacPar(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ pblk }) - idxr.offsetC());
