@@ -456,13 +456,13 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 * @brief analytically calculates the (static) state jacobian
 * @return 1 if jacobain estimation fits the predefined pattern of the jacobian, 0 if not.
 */
-int AxialConvectionDispersionOperatorBaseDG::calcStaticAnaJacobian(Eigen::SparseMatrix<double, RowMajor>& jacobian, Eigen::MatrixXd& jacInlet) {
+int AxialConvectionDispersionOperatorBaseDG::calcStaticAnaJacobian(Eigen::SparseMatrix<double, RowMajor>& jacobian, Eigen::MatrixXd& jacInlet, const int bulkOffset) {
 
 	// DG convection dispersion Jacobian
 	if (_exactInt)
-		calcConvDispDGSEMJacobian(jacobian, jacInlet);
+		calcConvDispDGSEMJacobian(jacobian, jacInlet, bulkOffset);
 	else
-		calcConvDispCollocationDGSEMJacobian(jacobian, jacInlet);
+		calcConvDispCollocationDGSEMJacobian(jacobian, jacInlet, bulkOffset);
 
 	if (!jacobian.isCompressed()) // if matrix lost its compressed storage, the pattern did not fit.
 		return 0;
@@ -490,12 +490,12 @@ unsigned int AxialConvectionDispersionOperatorBaseDG::nConvDispEntries(bool pure
 			+ _nComp * (_nCells * _nNodes * _nNodes + 8u * _nNodes); // dispersion entries
 	}
 }
-void model::parts::AxialConvectionDispersionOperatorBaseDG::convDispJacPattern(std::vector<T>& tripletList)
+void model::parts::AxialConvectionDispersionOperatorBaseDG::convDispJacPattern(std::vector<T>& tripletList, const int bulkOffset)
 {
 	if (_exactInt)
-		ConvDispNodalPattern(tripletList);
+		ConvDispModalPattern(tripletList, bulkOffset);
 	else
-		ConvDispModalPattern(tripletList);
+		ConvDispNodalPattern(tripletList, bulkOffset);
 }
 /**
  * @brief Multiplies the time derivative Jacobian @f$ \frac{\partial F}{\partial \dot{y}}\left(t, y, \dot{y}\right) @f$ with a given vector
