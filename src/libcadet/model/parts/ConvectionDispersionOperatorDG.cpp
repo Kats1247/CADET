@@ -105,22 +105,6 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 	invMMatrix();
 	derivativeMatrix();
 
-	/* compute jacobian blocks(without parameters, i.e. static) */
-	_DGjacAxConvBlock = DGjacobianConvBlock();
-	// we only need unique dispersion blocks, which are given by cells 1, 2, nCol for inexact integration DG and by cells 1, 2, 3, nCol-1, nCol for eaxct integration DG
-	_DGjacAxDispBlocks = new Eigen::MatrixXd[(_exactInt ? std::min(_nCells, 5u) : std::min(_nCells, 3u))];
-	_DGjacAxDispBlocks[0] = DGjacobianDispBlock(1);
-	if (_nCells > 1)
-		_DGjacAxDispBlocks[1] = DGjacobianDispBlock(2);
-	if (_nCells > 2 && _exactInt)
-		_DGjacAxDispBlocks[2] = DGjacobianDispBlock(3);
-	else if (_nCells > 2 && !_exactInt)
-		_DGjacAxDispBlocks[2] = DGjacobianDispBlock(_nCells);
-	if (_exactInt && _nCells > 3)
-		_DGjacAxDispBlocks[3] = DGjacobianDispBlock(std::max(4u, _nCells - 1u));
-	if (_exactInt && _nCells > 4)
-		_DGjacAxDispBlocks[4] = DGjacobianDispBlock(_nCells);
-
 	if (paramProvider.exists("COL_DISPERSION_DEP"))
 	{
 		const std::string paramDepName = paramProvider.getString("COL_DISPERSION_DEP");
@@ -160,6 +144,23 @@ bool AxialConvectionDispersionOperatorBaseDG::configure(UnitOpIdx unitOpIdx, IPa
 	// Read geometry parameters
 	_colLength = paramProvider.getDouble("COL_LENGTH");
 	_deltaZ = _colLength / _nCells;
+
+	/* compute dispersion jacobian blocks(without parameters except element spacing, i.e. static entries) */
+	// we only need unique dispersion blocks, which are given by cells 1, 2, nCol for inexact integration DG and by cells 1, 2, 3, nCol-1, nCol for eaxct integration DG
+	_DGjacAxDispBlocks = new Eigen::MatrixXd[(_exactInt ? std::min(_nCells, 5u) : std::min(_nCells, 3u))];
+	_DGjacAxDispBlocks[0] = DGjacobianDispBlock(1);
+	if (_nCells > 1)
+		_DGjacAxDispBlocks[1] = DGjacobianDispBlock(2);
+	if (_nCells > 2 && _exactInt)
+		_DGjacAxDispBlocks[2] = DGjacobianDispBlock(3);
+	else if (_nCells > 2 && !_exactInt)
+		_DGjacAxDispBlocks[2] = DGjacobianDispBlock(_nCells);
+	if (_exactInt && _nCells > 3)
+		_DGjacAxDispBlocks[3] = DGjacobianDispBlock(std::max(4u, _nCells - 1u));
+	if (_exactInt && _nCells > 4)
+		_DGjacAxDispBlocks[4] = DGjacobianDispBlock(_nCells);
+
+	// note that convection jacobian block is computet in notifyDiscontinuousSectionTransition() since this block needs to be recomputed when flow direction changes
 
 	// Read cross section area or set to -1
 	_crossSection = -1.0;
@@ -432,7 +433,7 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// solve main equation RHS  d h / d x    //
 		// ======================================//
 
-		// calculate the substitute h(g(c), c) and  apply inverse mapping jacobian (reference space)
+		// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
 		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).cast<ResidualType>();
 
 		// DG volume integral in strong form
@@ -443,32 +444,13 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 
 		// calculate numerical flux values h*
 		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
-		_surfaceFlux *= -2.0 / static_cast<ParamType>(_deltaZ);
 
 		// DG surface integral in strong form
 		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
 			1u, _nNodes, _strideNode, _strideCell);
 	}
 
-//	convdisp::AxialFlowParameters<ParamType> fp{
-//		u,
-//		d_c,
-//		h,
-//		_wenoDerivatives,
-//		&_weno,
-//		&_stencilMemory,
-//		_wenoEpsilon,
-//		strideColCell(),
-//		_nComp,
-//		_nCol,
-//		0u,
-//		_nComp,
-//		_dispersionDep,
-//		model
-//	};
-//
-//	return convdispDG::residualKernelAxial<StateType, ResidualType, ParamType, RowIteratorType, wantJac>(SimulationTime{t, secIdx}, y, yDot, res, jacBegin, fp);
-	return 1;
+	return 0;
 }
 /**
 * @brief analytically calculates the (static) state jacobian
