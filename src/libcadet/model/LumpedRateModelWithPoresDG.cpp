@@ -576,18 +576,16 @@ unsigned int LumpedRateModelWithPoresDG::threadLocalMemorySize() const CADET_NOE
 
 unsigned int LumpedRateModelWithPoresDG::numAdDirsForJacobian() const CADET_NOEXCEPT
 {
-	// We need as many directions as the highest bandwidth of the diagonal blocks:
-	// The bandwidth of the column block depends on the DG discretization, whereas
-	// the bandwidth of the particle blocks are given by the number of components and bound states.
+	// The global DG Jacobian is banded around the main diagonal and has additional (also banded) entries for film diffusion.
+	// To feasibly seed and reconstruct the Jacobian, we create dedicated active directions for the bulk and each particle type (see @ todo)
 
-	// Get maximum stride of particle type blocks
-	int maxStride = 0;
+	int sumParBandwidth = 0;
 	for (unsigned int type = 0; type < _disc.nParType; ++type)
 	{
-		maxStride = std::max(maxStride, static_cast<int>(_disc.nComp + _disc.strideBound[type]));
+		sumParBandwidth += _disc.nComp + _disc.strideBound[type];
 	}
 
-	return std::max(_convDispOp.requiredADdirs(), maxStride);
+	return _convDispOp.requiredADdirs() + sumParBandwidth;
 }
 
 void LumpedRateModelWithPoresDG::useAnalyticJacobian(const bool analyticJac)
@@ -653,27 +651,45 @@ void LumpedRateModelWithPoresDG::prepareADvectors(const AdJacobianParams& adJac)
 		return;
 
 	Indexer idxr(_disc);
-	// @todo use more efficient seed vectors. currently, we treat the jacobian as banded, but the pattern is actually more sparse when multiple components are considered
-	// (note that active type directions are limited)
-	// We have different jacobian structure for exact integration and collocation DG scheme, i.e. we need different seed vectors
+
+	// The global DG Jacobian is banded around the main diagonal and has additional (also banded, but offset) entries for film diffusion,
+	// i.e. banded AD vector seeding is not sufficient (as it is for the FV Jacobians, see @puttmann2016 and the DG LRM Jacobian).
+	// The compressed vectorial AD seeding and Jacobian construction is described in the following (as in @todo?).
+	// The global DG Jacobian is banded around the main diagonal and has additional (also banded) entries for film diffusion.
+	// To feasibly seed and reconstruct the Jacobian (we need information for decompression), we create dedicated active directions for
+	// the bulk and each particle type (see @ todo).
+
+	// We begin by seeding the (banded around main diagonal) bulk Jacobian block
+	// We have differing Jacobian structures for exact integration and collocation DG scheme, i.e. we need different seed vectors
 	// collocation DG: 2 * N_n * (N_c + N_q) + 1 = total bandwidth (main diagonal entries maximally depend on the next and last N_n liquid phase entries of same component)
 	//    ex. int. DG: 4 * N_n * (N_c + N_q) + 1 = total bandwidth (main diagonal entries maximally depend on the next and last 2*N_n liquid phase entries of same component)
-	int lowerBandwidth = (_disc.exactInt) ? 2 * _disc.nNodes * idxr.strideColNode() : _disc.nNodes * idxr.strideColNode();
-	int upperBandwidth = lowerBandwidth;
+	const int lowerBandwidth = (_disc.exactInt) ? 2 * _disc.nNodes * idxr.strideColNode() : _disc.nNodes * idxr.strideColNode();
+	const int upperBandwidth = lowerBandwidth;
+	const int bulkRows = idxr.offsetCp() - idxr.offsetC();
+	ad::prepareAdVectorSeedsForBandMatrix(adJac.adY + _disc.nComp, adJac.adDirOffset, bulkRows, lowerBandwidth, upperBandwidth, lowerBandwidth);
 
-	// todo 
-	// we cant use bandmatrix adSeeds for LRMP (and GRM) anymore since we have a global Jacobian for DG
-	// 
-	//ad::prepareAdVectorSeedsForBandMatrix(adJac.adY + _disc.nComp, adJac.adDirOffset, _globalJac.rows(), lowerBandwidth, upperBandwidth, lowerBandwidth);
+	// We now seed the particle Jacobian blocks using the individual AD directions for each particle type.
+	unsigned int adDirOffset = adJac.adDirOffset + _convDispOp.requiredADdirs();
 
-	//// Particle block
-	//for (unsigned int type = 0; type < _disc.nParType; ++type)
-	//{
-	//	const unsigned int lowerParBandwidth = _jacP[type].lowerBandwidth();
-	//	const unsigned int upperParBandwidth = _jacP[type].upperBandwidth();
+	for (unsigned int type = 0; type < _disc.nParType; type++)
+	{
+		for (unsigned int parBlock = 0; parBlock < _disc.nPoints; parBlock++)
+		{
+			// move adVec pointer to start of current particle block 
+			active* _adVec = adJac.adY + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ parBlock });
 
-	//	ad::prepareAdVectorSeedsForBandMatrix(adJac.adY + idxr.offsetCp(ParticleTypeIndex{ type }), adJac.adDirOffset, idxr.strideParBlock(type) * _disc.nPoints, lowerParBandwidth, upperParBandwidth, lowerParBandwidth);
-	//}
+			for (int eq = 0; eq < idxr.strideParBlock(type); ++eq)
+			{
+				// Clear previously set directions
+				_adVec[eq].fillADValue(adJac.adDirOffset, 0.0);
+				// Set direction
+				_adVec[eq].setADValue(adDirOffset + eq, 1.0);
+
+			}
+		}
+		if (type < _disc.nParType - 1u) // move to dedicated DoFs of next particle type
+			adDirOffset += idxr.strideParBlock(type);
+	}
 }
 
 /**
@@ -685,18 +701,39 @@ void LumpedRateModelWithPoresDG::extractJacobianFromAD(active const* const adRes
 {
 	Indexer idxr(_disc);
 
-	// todo 
-	// we cant use bandmatrix adSeeds for LRMP (and GRM) anymore since we have a global Jacobian for DG
+	const active* const adVec = adRes + idxr.offsetC();
 
-	//// Column
-	//_convDispOp.extractJacobianFromAD(adRes, adDirOffset);
+	/* Extract bulk phase equations entries */
+	const int lowerBandwidth = (_disc.exactInt) ? 2 * _disc.nNodes * idxr.strideColNode() : _disc.nNodes * idxr.strideColNode();
+	const int upperBandwidth = lowerBandwidth;
+	const int stride = lowerBandwidth + 1 + upperBandwidth;
+	int diagDir = lowerBandwidth;
+	const int bulkDoFs = idxr.offsetCp() - idxr.offsetC();
+	int eqOffset = 0;
+	ad::extractBandedBlockEigenJacobianFromAd(adVec, adDirOffset, diagDir, lowerBandwidth, upperBandwidth, eqOffset, bulkDoFs, _globalJac);
+	
+	/* Film diffusion flux entries are handled analytically (todo: point to where that happens) */
 
-	//// Particles
-	//for (unsigned int type = 0; type < _disc.nParType; ++type)
-	//{
-	//	linalg::BandMatrix& jacMat = _jacP[type];
-	//	ad::extractBandedJacobianFromAd(adRes + idxr.offsetCp(ParticleTypeIndex{ type }), adDirOffset, jacMat.lowerBandwidth(), jacMat);
-	//}
+	/* Handle particle liquid and solid phase equations entries */
+	// Read particle Jacobian enries from dedicated AD directions
+	int offsetParticleTypeDirs = adDirOffset + _convDispOp.requiredADdirs();
+
+	for (unsigned int type = 0; type < _disc.nParType; type++)
+	{
+		for (unsigned int par = 0; par < _disc.nPoints; par++)
+		{
+			const int eqOffset_res = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+			const int eqOffset_mat = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) - idxr.offsetC();
+			for (unsigned int phase = 0; phase < idxr.strideParBlock(type); phase++)
+			{
+				for (unsigned int phaseTo = 0; phaseTo < idxr.strideParBlock(type); phaseTo++)
+				{
+					_globalJac.coeffRef(eqOffset_mat + phase, eqOffset_mat + phaseTo) = adRes[eqOffset_res + phase].getADValue(offsetParticleTypeDirs + phaseTo);
+				}
+			}
+		}
+		offsetParticleTypeDirs += idxr.strideParBlock(type);
+	}
 }
 
 #ifdef CADET_CHECK_ANALYTIC_JACOBIAN
@@ -878,7 +915,6 @@ int LumpedRateModelWithPoresDG::residualImpl(double t, unsigned int secIdx, Stat
 			const unsigned int type = (pblk) / _disc.nPoints;
 			const unsigned int par = (pblk) % _disc.nPoints;
 			residualParticle<StateType, ResidualType, ParamType, wantJac>(t, type, par, secIdx, y, yDot, res, threadLocalMem);
-
 	}
 
 	BENCH_STOP(_timerResidualPar);
