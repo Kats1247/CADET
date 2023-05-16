@@ -24,7 +24,6 @@
 #include "model/BindingModel.hpp"
 #include "SimulationTypes.hpp"
 #include "linalg/DenseMatrix.hpp"
-#include "linalg/BandMatrix.hpp"
 #include "linalg/Norms.hpp"
 #include "linalg/Subset.hpp"
 #include "model/parts/BindingCellKernel.hpp"
@@ -325,12 +324,12 @@ namespace cadet
 #ifndef CADET_CHECK_ANALYTIC_JACOBIAN
 			_analyticJac = analyticJac;
 			if (!_analyticJac)
-				_jacobianAdDirs = (_disc.exactInt) ? 4 * _disc.nNodes * idxr.strideColNode() + 1 : 2 * _disc.nNodes * idxr.strideColNode() + 1;
+				_jacobianAdDirs = _convDispOp.requiredADdirs();
 			else
 				_jacobianAdDirs = 0;
 #else
 			_analyticJac = false;
-			_jacobianAdDirs = (_disc.exactInt) ? 4 * _disc.nNodes * idxr.strideColNode() + 1 : 2 * _disc.nNodes * idxr.strideColNode() + 1;
+			_jacobianAdDirs = _convDispOp.requiredADdirs();
 #endif
 		}
 
@@ -388,7 +387,6 @@ namespace cadet
 				return;
 
 			Indexer idxr(_disc);
-
 			// @todo use more efficient seed vectors. currently, we treat the jacobian as banded, but the pattern is actually more sparse when multiple components are considered
 			// (note that active type directions are limited)
 			// We have different jacobian structure for exact integration and collocation DG scheme, i.e. we need different seed vectors
@@ -417,29 +415,10 @@ namespace cadet
 			const int stride = lowerBandwidth + 1 + upperBandwidth;
 
 			int diagDir = lowerBandwidth;
-			for (int eq = 0; eq < _jac.rows(); ++eq)
-			{
-				// Start with lowest subdiagonal and stay in the range of the columns:
-				// diagDir might be too big for the matrix and, hence, dir ranges between
-				// diagDir - lowerBandwidth <= dir <= diagDir + upperBandwidth
-				int dir = diagDir - lowerBandwidth + eq % stride;
+			const int nCols = _jac.cols();
+			const int colOffset = 0;
 
-				// Loop over diagonals
-				for (int diag = 0; diag < stride; ++diag)
-				{
-					if (eq - lowerBandwidth + diag >= 0 && // left boundary
-						eq - lowerBandwidth + diag < _jac.cols() && // right boundary
-						adVec[eq].getADValue(adDirOffset + dir) != 0.0 // keep pattern
-						)
-						_jac.coeffRef(eq, eq - lowerBandwidth + diag) = adVec[eq].getADValue(adDirOffset + dir);
-
-					// Wrap around at end of row and jump to lowest subdiagonal
-					if (dir == diagDir + upperBandwidth)
-						dir = diagDir - lowerBandwidth;
-					else
-						++dir;
-				}
-			}
+			ad::extractBandedBlockEigenJacobianFromAd(adVec, adDirOffset, diagDir, lowerBandwidth, upperBandwidth, colOffset, nCols, _jac);
 
 		}
 
