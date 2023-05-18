@@ -400,8 +400,8 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 				active* const localAdY = adJac.adY ? adJac.adY + localOffsetToParticle + localOffsetInParticle : nullptr;
 
 				// r (particle) coordinate of current node
-				const double r = _disc.deltaR[type] * std::floor(node / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][node % _disc.nParNode[type]]);
+				const double r = static_cast<double>(_disc.deltaR[type]) * std::floor(node / _disc.nParNode[type])
+					+ 0.5 * static_cast<double>(_disc.deltaR[type]) * (1 + _disc.parNodes[type][node % _disc.nParNode[type]]);
 				const ColumnPosition colPos{ z, 0.0, r };
 
 				// Determine whether nonlinear solver is required
@@ -716,8 +716,8 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
 			if (_binding[type]->dependsOnTime())
 			{
 				// r (particle) coordinate of current node (particle radius normed to 1) - needed in externally dependent adsorption kinetic
-				const double r = (_disc.deltaR[type] * std::floor(j / _disc.nParNode[type])
-					+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][j % _disc.nParNode[type]]))
+				const double r = (static_cast<double>(_disc.deltaR[type]) * std::floor(j / _disc.nParNode[type])
+					+ 0.5 * static_cast<double>(_disc.deltaR[type]) * (1 + _disc.parNodes[type][j % _disc.nParNode[type]]))
 					/ (static_cast<double>(_parRadius[type]) - static_cast<double>(_parCoreRadius[type]));
 				_binding[type]->timeDerivativeQuasiStationaryFluxes(simTime.t, simTime.secIdx,
 					ColumnPosition{ z, 0.0, r },
@@ -836,8 +836,8 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
 					const int localOffsetInParticle = static_cast<int>(shell) * idxr.strideParNode(type) + idxr.strideParLiquid();
 					double* const qShell = vecStateY + localOffsetToParticle + localOffsetInParticle;
 					// r (particle) coordinate of current node
-					const double r = _disc.deltaR[type] * std::floor(shell / _disc.nParNode[type])
-						+ 0.5 * _disc.deltaR[type] * (1 + _disc.parNodes[type][shell % _disc.nParNode[type]]);
+					const double r = static_cast<double>(_disc.deltaR[type]) * std::floor(shell / _disc.nParNode[type])
+						+ 0.5 * static_cast<double>(_disc.deltaR[type]) * (1 + _disc.parNodes[type][shell % _disc.nParNode[type]]);
 					const ColumnPosition colPos{ z, 0.0, r};
 
 					// Perform consistent initialization that does not require a full fledged nonlinear solver (that may fail or damage the current state vector)
@@ -894,39 +894,31 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
  */
 void GeneralRateModelDG::leanConsistentInitialTimeDerivative(double t, double const* const vecStateY, double* const vecStateYdot, double* const res, util::ThreadLocalStorage& threadLocalMem)
 {
-	// @TODO?
-	//if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
-	//	LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
+	if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
+		LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
 
-	//BENCH_SCOPE(_timerConsistentInit);
+	BENCH_SCOPE(_timerConsistentInit);
 
-	//Indexer idxr(_disc);
+	Indexer idxr(_disc);
 
-	//// Step 2: Compute the correct time derivative of the state vector
+	// Step 2: Compute the correct time derivative of the state vector
 
-	//// Step 2a: Assemble, factorize, and solve column bulk block of linear system
+	// Step 2a: Assemble, factorize, and solve column bulk block of linear system
 
-	//// Note that the residual is not negated as required at this point. We will fix that later.
+	// Note that the residual is not negated as required at this point. We will fix that later.
 
-	//double* const resSlice = res + idxr.offsetC();
+	double* const resSlice = res + idxr.offsetC();
 
-	//// Handle bulk block
-	//_convDispOp.solveTimeDerivativeSystem(SimulationTime{ t, 0u }, resSlice);
+	// Handle bulk block
+	solveBulkTimeDerivativeSystem(SimulationTime{ t, 0u }, resSlice);
 
-	//// Note that we have solved with the *positive* residual as right hand side
-	//// instead of the *negative* one. Fortunately, we are dealing with linear systems,
-	//// which means that we can just negate the solution.
-	//double* const yDotSlice = vecStateYdot + idxr.offsetC();
-	//for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
-	//	yDotSlice[i] = -resSlice[i];
+	// Note that we have solved with the *positive* residual as right hand side
+	// instead of the *negative* one. Fortunately, we are dealing with linear systems,
+	// which means that we can just negate the solution.
+	double* const yDotSlice = vecStateYdot + idxr.offsetC();
+	for (unsigned int i = 0; i < _disc.nPoints * _disc.nComp; ++i)
+		yDotSlice[i] = -resSlice[i];
 
-	//// Step 2b: Solve for fluxes j_f by backward substitution
-
-	//// Reset \dot{j}_f to 0.0
-	//double* const jfDot = vecStateYdot + idxr.offsetJf();
-	//std::fill(jfDot, jfDot + _disc.nComp * _disc.nPoints * _disc.nParType, 0.0);
-
-	//solveForFluxes(vecStateYdot, idxr);
 }
 
 void GeneralRateModelDG::initializeSensitivityStates(const std::vector<double*>& vecSensY) const
@@ -1207,6 +1199,46 @@ void GeneralRateModelDG::consistentInitialSensitivity(const SimulationTime& simT
 //	}
 }
 
+void GeneralRateModelDG::solveBulkTimeDerivativeSystem(const SimulationTime& simTime, double* const rhs) {
+
+	Indexer idxr(_disc);
+
+	// Assemble
+	double* vals = _globalJacDisc.valuePtr();
+	for (int entry = 0; entry < _globalJacDisc.nonZeros(); entry++)
+		vals[entry] = 0.0;
+
+	double alpha = 1.0;
+	const int gapCell = idxr.strideColNode() - static_cast<int>(_disc.nComp) * idxr.strideColComp();
+	linalg::BandedEigenSparseRowIterator jac(_globalJacDisc, idxr.offsetC());
+
+	for (unsigned int point = 0; point < _disc.nPoints; ++point, jac += gapCell) {
+		for (unsigned int comp = 0; comp < _disc.nComp; ++comp, ++jac) {
+			// dc_b / dt in transport equation
+			jac[0] += alpha;
+		}
+	}
+
+	const int bulkRows = idxr.offsetCp() - idxr.offsetC();
+	_globalSolver.analyzePattern(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), bulkRows, bulkRows));
+	_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), bulkRows, bulkRows));
+
+	if (_globalSolver.info() != Success) {
+		LOG(Error) << "factorization failed in sensitivity initialization";
+	}
+
+	Eigen::Map<Eigen::VectorXd> ret_vec(rhs, bulkRows);
+	ret_vec = _globalSolver.solve(ret_vec);
+
+	// Use the factors to solve the linear system 
+	if (_globalSolver.info() != Success) {
+		LOG(Error) << "solve failed in sensitivity initialization";
+	}
+
+	// reset linear solver to global Jacobian
+	_globalSolver.analyzePattern(_globalJacDisc);
+}
+
 /**
  * @brief Computes approximately / partially consistent initial values and time derivatives of sensitivity subsystems
  * @details Given the DAE \f[ F(t, y, \dot{y}) = 0, \f] and initial values \f$ y_0 \f$ and \f$ \dot{y}_0 \f$,
@@ -1256,52 +1288,37 @@ void GeneralRateModelDG::consistentInitialSensitivity(const SimulationTime& simT
 void GeneralRateModelDG::leanConsistentInitialSensitivity(const SimulationTime& simTime, const ConstSimulationState& simState,
 	std::vector<double*>& vecSensY, std::vector<double*>& vecSensYdot, active const* const adRes, util::ThreadLocalStorage& threadLocalMem)
 {
-	// @TODO?
+	if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
+		LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
 
-	//if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
-	//	LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
+	BENCH_SCOPE(_timerConsistentInit);
 
-	//BENCH_SCOPE(_timerConsistentInit);
+	Indexer idxr(_disc);
 
-	//Indexer idxr(_disc);
+	for (std::size_t param = 0; param < vecSensY.size(); ++param)
+	{
+		double* const sensY = vecSensY[param];
+		double* const sensYdot = vecSensYdot[param];
 
-	//for (std::size_t param = 0; param < vecSensY.size(); ++param)
-	//{
-	//	double* const sensY = vecSensY[param];
-	//	double* const sensYdot = vecSensYdot[param];
+		// Copy parameter derivative from AD to tempState and negate it
+		// We need to use _tempState in order to keep sensYdot unchanged at this point
+		for (int i = 0; i < idxr.offsetCp(); ++i)
+			_tempState[i] = -adRes[i].getADValue(param);
 
-	//	// Copy parameter derivative from AD to tempState and negate it
-	//	// We need to use _tempState in order to keep sensYdot unchanged at this point
-	//	for (int i = 0; i < idxr.offsetCp(); ++i)
-	//		_tempState[i] = -adRes[i].getADValue(param);
+		std::fill(_tempState + idxr.offsetCp(), _tempState + numDofs(), 0.0);
 
-	//	std::fill(_tempState + idxr.offsetCp(), _tempState + idxr.offsetJf(), 0.0);
+		// Step 2: Compute the correct time derivative of the state vector, i.e.
+		// assemble, factorize, and solve diagonal blocks of linear system
 
-	//	for (unsigned int i = idxr.offsetJf(); i < numDofs(); ++i)
-	//		_tempState[i] = -adRes[i].getADValue(param);
+		// Compute right hand side by adding -dF / dy * s = -J * s to -dF / dp which is already stored in _tempState
+		multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, _tempState);
 
-	//	// Step 1: Compute fluxes j_f, right hand side is -dF / dp
-	//	std::copy(_tempState + idxr.offsetJf(), _tempState + numDofs(), sensY + idxr.offsetJf());
+		// Copy relevant parts to sensYdot for use as right hand sides
+		std::copy(_tempState + idxr.offsetC(), _tempState + idxr.offsetCp(), sensYdot + idxr.offsetC());
 
-	//	solveForFluxes(sensY, idxr);
-
-	//	// Step 2: Compute the correct time derivative of the state vector
-
-	//	// Step 2a: Assemble, factorize, and solve diagonal blocks of linear system
-
-	//	// Compute right hand side by adding -dF / dy * s = -J * s to -dF / dp which is already stored in _tempState
-	//	multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, _tempState);
-
-	//	// Copy relevant parts to sensYdot for use as right hand sides
-	//	std::copy(_tempState + idxr.offsetC(), _tempState + idxr.offsetCp(), sensYdot + idxr.offsetC());
-	//	std::copy(_tempState + idxr.offsetJf(), _tempState + numDofs(), sensYdot);
-
-	//	// Handle bulk block
-	//	_convDispOp.solveTimeDerivativeSystem(simTime, sensYdot + idxr.offsetC());
-
-	//	// Step 2b: Solve for fluxes j_f by backward substitution
-	//	solveForFluxes(sensYdot, idxr);
-	//}
+		// Handle bulk block
+		solveBulkTimeDerivativeSystem(simTime, sensYdot + idxr.offsetC());
+	}
 }
 
 }  // namespace model

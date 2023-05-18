@@ -1047,26 +1047,28 @@ bool ConvectionDispersionOperatorDG<Operator>::solveDiscretizedJacobian(double* 
 template <typename Operator>
 bool ConvectionDispersionOperatorDG<Operator>::solveTimeDerivativeSystem(const SimulationTime& simTime, double* const rhs)
 {
-	// todo: this functionality is currently not needed for DG since we assemble and factorize a global jacobian, not blocks (as in FV)
-	//// Assemble
-	//_jacCdisc.setAll(0.0);
-	//addTimeDerivativeToJacobian(1.0);
+	// Assemble
+	double* vals = _jacCdisc.valuePtr();
+	for (int entry = 0; entry < _jacCdisc.nonZeros(); entry++)
+		vals[entry] = 0.0;
 
-	//// Factorize
-	//const bool result = _jacCdisc.factorize();
-	//if (!result)
-	//{
-	//	LOG(Error) << "Factorize() failed for bulk block";
-	//	return false;
-	//}
+	addTimeDerivativeToJacobian(1.0);
 
-	//// Solve
-	//const bool result2 = _jacCdisc.solve(rhs);
-	//if (!result2)
-	//{
-	//	LOG(Error) << "Solve() failed for bulk block";
-	//	return false;
-	//}
+	Eigen::SparseLU<Eigen::SparseMatrix<double>> _linSolver;
+	_linSolver.analyzePattern(_jacCdisc);
+	_linSolver.factorize(_jacCdisc);
+
+	if (_linSolver.info() != Success) {
+		LOG(Error) << "factorization failed in sensitivity initialization";
+	}
+
+	Eigen::Map<Eigen::VectorXd> ret_vec(rhs, _jacCdisc.rows());
+	ret_vec = _linSolver.solve(ret_vec);
+
+	// Use the factors to solve the linear system 
+	if (_linSolver.info() != Success) {
+		LOG(Error) << "solve failed in sensitivity initialization";
+	}
 
 	return true;
 }
