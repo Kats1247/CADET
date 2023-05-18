@@ -1462,7 +1462,6 @@ protected:
 	Eigen::SparseMatrix<double, Eigen::RowMajor> _jacCdisc; //!< Jacobian with time derivatives from BDF method
 
 	// Indexer functionality
-
 	// Offsets
 	inline int offsetC() const CADET_NOEXCEPT { return _baseOp.nComp(); }
 
