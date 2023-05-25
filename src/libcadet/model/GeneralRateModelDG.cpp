@@ -999,10 +999,8 @@ void GeneralRateModelDG::extractJacobianFromAD(active const* const adRes, unsign
 	const int matOffset = idxr.offsetC();
 	ad::extractBandedBlockEigenJacobianFromAd(adVec, adDirOffset, diagDir, lowerBandwidth, upperBandwidth, eqOffset, bulkDoFs, _globalJac, matOffset);
 
-	/* Film diffusion flux entries are handled analytically (todo: point to where that happens) */
-
 	/* Handle particle liquid and solid phase equations entries */
-	// Read particle Jacobian enries from dedicated AD directions
+	// Read particle Jacobian entries from dedicated AD directions
 	int offsetParticleTypeDirs = adDirOffset + _convDispOp.requiredADdirs();
 
 	for (unsigned int type = 0; type < _disc.nParType; type++)
@@ -1677,9 +1675,9 @@ void GeneralRateModelDG::multiplyWithDerivativeJacobian(const SimulationTime& si
 
 			// Particle shells
 			const int offsetCpType = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ pblk });
-			for (unsigned int shell = 0; shell < _disc.nParCell[type]; ++shell)
+			for (unsigned int shell = 0; shell < _disc.nParPoints[type]; ++shell)
 			{
-				const int offsetCpShell = offsetCpType + shell * idxr.strideParShell(type);
+				const int offsetCpShell = offsetCpType + shell * idxr.strideParNode(type);
 				double const* const mobileSdot = sDot + offsetCpShell;
 				double* const mobileRet = ret + offsetCpShell;
 
