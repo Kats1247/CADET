@@ -9,8 +9,6 @@
 //  your option, any later version) which accompanies this distribution, and
 //  is available at http://www.gnu.org/licenses/gpl.html
 // =============================================================================
-//TODO: delete iostream include
-#include <iostream>
 
 #include "model/GeneralRateModelDG.hpp"
 #include "model/BindingModel.hpp"
@@ -262,8 +260,7 @@ void GeneralRateModelDG::readInitialCondition(IParameterProvider& paramProvider)
  *          The process works in two steps:
  *          <ol>
  *              <li>Solve all algebraic equations in the model (e.g., quasi-stationary isotherms, reaction equilibria).
- *                 Once all @f$ c_i @f$, @f$ c_{p,i} @f$, and @f$ q_i^{(j)} @f$ have been computed, solve for the
- *                 fluxes @f$ j_{f,i} @f$ (only linear equations).</li>
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *              <li>Compute the time derivatives of the state @f$ \dot{y} @f$ such that the residual is 0.
  *                 However, because of the algebraic equations, we need additional conditions to fully determine
  *                 @f$ \dot{y}@f$. By differentiating the algebraic equations with respect to time, we get the
@@ -287,9 +284,7 @@ void GeneralRateModelDG::readInitialCondition(IParameterProvider& paramProvider)
  *     of @f$ \dot{y} @f$ for differential equations and 0 for algebraic equations
  *     (@f$ -\frac{\partial F}{\partial t}@f$, to be more precise).
  *
- *     The linear system is solved by backsubstitution. First, the diagonal blocks are solved in parallel.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     diagonal blocks.</li>
+ *     The linear system is solved by backsubstitution. First, the diagonal blocks are solved in parallel.</li>
  *          </ol>
  *     This function performs step 1. See consistentInitialTimeDerivative() for step 2.
  *
@@ -316,7 +311,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			return;
 		}
 	}
-	
+
 	// Step 1: Solve algebraic equations
 
 	// Step 1a: Compute quasi-stationary binding model state
@@ -351,12 +346,12 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 		const linalg::ConstMaskArray mask{ qsMask.data(), static_cast<int>(_disc.nComp + _disc.strideBound[type]) };
 		const int probSize = linalg::numMaskActive(mask);
 
-//#ifdef CADET_PARALLELIZE
-//		BENCH_SCOPE(_timerConsistentInitPar);
-//		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t pblk)
-//#else
+		#ifdef CADET_PARALLELIZE
+			BENCH_SCOPE(_timerConsistentInitPar);
+			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t pblk)
+		#else
 		for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
-//#endif
+			#endif
 		{
 			LinearBufferAllocator tlmAlloc = threadLocalMem.get();
 
@@ -417,25 +412,24 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 
 				std::function<bool(double const* const, linalg::detail::DenseMatrixBase&)> jacFunc;
 
-				// @todo AD for DG
-//				if (localAdY && localAdRes)
-//				{
-//					jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
-//					{
-//						// Copy over state vector to AD state vector (without changing directional values to keep seed vectors)
-//						// and initialize residuals with zero (also resetting directional values)
-//						ad::copyToAd(qShell - _disc.nComp, localAdY, mask.len);
-//						// @todo Check if this is necessary
-//						ad::resetAd(localAdRes, mask.len);
-//
-//						// Prepare input vector by overwriting masked items
-//						linalg::applyVectorSubset(x, mask, localAdY);
-//
-//						// Call residual function
-//						parts::cell::residualKernel<active, active, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, false, true>(
-//							simTime.t, simTime.secIdx, colPos, localAdY, nullptr, localAdRes, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
-//							);
-//
+				if (localAdY && localAdRes)
+				{
+					jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
+					{
+						// Copy over state vector to AD state vector (without changing directional values to keep seed vectors)
+						// and initialize residuals with zero (also resetting directional values)
+						ad::copyToAd(qShell - _disc.nComp, localAdY, mask.len);
+						// @todo Check if this is necessary
+						ad::resetAd(localAdRes, mask.len);
+
+						// Prepare input vector by overwriting masked items
+						linalg::applyVectorSubset(x, mask, localAdY);
+
+						// Call residual function
+						parts::cell::residualKernel<active, active, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, false, true>(
+							simTime.t, simTime.secIdx, colPos, localAdY, nullptr, localAdRes, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
+							);
+// todo check Jacobian with AD
 //#ifdef CADET_CHECK_ANALYTIC_JACOBIAN
 //						std::copy_n(qShell - _disc.nComp, mask.len, fullX);
 //						linalg::applyVectorSubset(x, mask, fullX);
@@ -452,96 +446,112 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 //						);
 //						LOG(Debug) << "MaxDiff: " << diff;
 //#endif
-//
-//						// Extract Jacobian from AD
-//						ad::extractDenseJacobianFromBandedAd(
-//							localAdRes - localOffsetInParticle, localOffsetInParticle, adJac.adDirOffset, _jacP[type * _disc.nPoints].lowerBandwidth(),
-//							_jacP[type * _disc.nPoints].lowerBandwidth(), _jacP[type * _disc.nPoints].upperBandwidth(), fullJacobianMatrix
-//						);
-//
-//						// Extract Jacobian from full Jacobian
-//						mat.setAll(0.0);
-//						linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
-//
-//						// Replace upper part with conservation relations
-//						mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
-//
-//						unsigned int bndIdx = 0;
-//						unsigned int rIdx = 0;
-//						unsigned int bIdx = 0;
-//						for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-//						{
-//							if (!mask.mask[comp])
-//							{
-//								bndIdx += _disc.nBound[_disc.nComp * type + comp];
-//								continue;
-//							}
-//
-//							mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
-//
-//							for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
-//							{
-//								if (mask.mask[bndIdx])
-//								{
-//									mat.native(rIdx, bIdx + numActiveComp) = epsQ;
-//									++bIdx;
-//								}
-//							}
-//
-//							++rIdx;
-//						}
-//
-//						return true;
-//					};
-//				}
-//				else
-//				{
-				jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
-				{
-					// Prepare input vector by overwriting masked items
-					std::copy_n(qShell - _disc.nComp, mask.len, fullX);
-					linalg::applyVectorSubset(x, mask, fullX);
 
-					// Call residual function
-					parts::cell::residualKernel<double, double, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, true, true>(
-						simTime.t, simTime.secIdx, colPos, fullX, nullptr, fullResidual, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
-						);
+						// Extract Jacobian from AD
+						// Read particle Jacobian entries from dedicated AD directions
+						int offsetParticleTypeDirs = adJac.adDirOffset + _convDispOp.requiredADdirs();
+						const active* const adRes = adJac.adRes;
 
-					// Extract Jacobian from full Jacobian
-					mat.setAll(0.0);
-					linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
-
-					// Replace upper part with conservation relations
-					mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
-
-					unsigned int bndIdx = 0;
-					unsigned int rIdx = 0;
-					unsigned int bIdx = 0;
-					for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
-					{
-						if (!mask.mask[comp])
+						for (unsigned int type = 0; type < _disc.nParType; type++)
 						{
-							bndIdx += _disc.nBound[_disc.nComp * type + comp];
-							continue;
-						}
-
-						mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
-
-						for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
-						{
-							if (mask.mask[bndIdx])
+							for (unsigned int par = 0; par < _disc.nPoints; par++)
 							{
-								mat.native(rIdx, bIdx + numActiveComp) = epsQ;
-								++bIdx;
+								const int eqOffset_res = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+								const int eqOffset_mat = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
+								for (unsigned int phase = 0; phase < idxr.strideParBlock(type); phase++)
+								{
+									for (unsigned int phaseTo = 0; phaseTo < idxr.strideParBlock(type); phaseTo++)
+									{
+										_globalJac.coeffRef(eqOffset_mat + phase, eqOffset_mat + phaseTo) = adRes[eqOffset_res + phase].getADValue(offsetParticleTypeDirs + phaseTo);
+									}
+								}
 							}
+							offsetParticleTypeDirs += idxr.strideParBlock(type);
 						}
 
-						++rIdx;
-					}
+						// Extract Jacobian from full Jacobian
+						mat.setAll(0.0);
+						linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
 
-					return true;
-				};
-				//} // @todo AD
+						// Replace upper part with conservation relations
+						mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
+
+						unsigned int bndIdx = 0;
+						unsigned int rIdx = 0;
+						unsigned int bIdx = 0;
+						for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+						{
+							if (!mask.mask[comp])
+							{
+								bndIdx += _disc.nBound[_disc.nComp * type + comp];
+								continue;
+							}
+
+							mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
+
+							for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
+							{
+								if (mask.mask[bndIdx])
+								{
+									mat.native(rIdx, bIdx + numActiveComp) = epsQ;
+									++bIdx;
+								}
+							}
+
+							++rIdx;
+						}
+
+						return true;
+					};
+				}
+				else
+				{
+					jacFunc = [&](double const* const x, linalg::detail::DenseMatrixBase& mat)
+					{
+						// Prepare input vector by overwriting masked items
+						std::copy_n(qShell - _disc.nComp, mask.len, fullX);
+						linalg::applyVectorSubset(x, mask, fullX);
+
+						// Call residual function
+						parts::cell::residualKernel<double, double, double, parts::cell::CellParameters, linalg::DenseBandedRowIterator, true, true>(
+							simTime.t, simTime.secIdx, colPos, fullX, nullptr, fullResidual, fullJacobianMatrix.row(0), cellResParams, tlmAlloc
+							);
+
+						// Extract Jacobian from full Jacobian
+						mat.setAll(0.0);
+						linalg::copyMatrixSubset(fullJacobianMatrix, mask, mask, mat);
+
+						// Replace upper part with conservation relations
+						mat.submatrixSetAll(0.0, 0, 0, numActiveComp, probSize);
+
+						unsigned int bndIdx = 0;
+						unsigned int rIdx = 0;
+						unsigned int bIdx = 0;
+						for (unsigned int comp = 0; comp < _disc.nComp; ++comp)
+						{
+							if (!mask.mask[comp])
+							{
+								bndIdx += _disc.nBound[_disc.nComp * type + comp];
+								continue;
+							}
+
+							mat.native(rIdx, rIdx) = static_cast<double>(_parPorosity[type]);
+
+							for (unsigned int bnd = 0; bnd < _disc.nBound[_disc.nComp * type + comp]; ++bnd, ++bndIdx)
+							{
+								if (mask.mask[bndIdx])
+								{
+									mat.native(rIdx, bIdx + numActiveComp) = epsQ;
+									++bIdx;
+								}
+							}
+
+							++rIdx;
+						}
+
+						return true;
+					};
+				}
 
 				// Apply nonlinear solver
 				_nonlinearSolver->solve(
@@ -600,9 +610,8 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
 			// reset jacobian pattern
 			setJacobianPattern_GRM(_globalJacDisc, _disc.curSection, _dynReactionBulk);
 
-		} //CADET_PARFOR_END;
+		} CADET_PARFOR_END;
 	}
-
 }
 
 /**
@@ -614,8 +623,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
  *          The process works in two steps:
  *          <ol>
  *              <li>Solve all algebraic equations in the model (e.g., quasi-stationary isotherms, reaction equilibria).
- *                 Once all @f$ c_i @f$, @f$ c_{p,i} @f$, and @f$ q_i^{(j)} @f$ have been computed, solve for the
- *                 fluxes @f$ j_{f,i} @f$ (only linear equations).</li>
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *              <li>Compute the time derivatives of the state @f$ \dot{y} @f$ such that the residual is 0.
  *                 However, because of the algebraic equations, we need additional conditions to fully determine
  *                 @f$ \dot{y}@f$. By differentiating the algebraic equations with respect to time, we get the
@@ -640,8 +648,7 @@ void GeneralRateModelDG::consistentInitialState(const SimulationTime& simTime, d
  *     (@f$ -\frac{\partial F}{\partial t}@f$, to be more precise).
  *
  *     The linear system is solved by backsubstitution. First, the diagonal blocks are solved in parallel.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     diagonal blocks.</li>
+ *     No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG)</li>
  *          </ol>
  *     This function performs step 2. See consistentInitialState() for step 1.
  *
@@ -771,7 +778,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
  *          The process works in two steps:
  *          <ol>
  *              <li>Keep state and time derivative vectors as they are (i.e., do not solve algebraic equations).
- *                 Only solve for the fluxes @f$ j_{f,i} @f$ (only linear equations).</li>
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *              <li>Compute the time derivatives of the state @f$ \dot{y} @f$ such that the residual is 0 in the column
  *                 bulk and flux blocks. The resulting equations are stated below:
  *                 @f[ \begin{align}
@@ -787,8 +794,7 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
  *     of @f$ \dot{y} @f$ for the bulk block and 0 for the flux block.
  *
  *     The linear system is solved by backsubstitution. First, the bulk block is solved.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     bulk block and the unchanged particle block time derivative vectors.</li>
+ *     No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *          </ol>
  *     This function performs step 1. See leanConsistentInitialTimeDerivative() for step 2.
  *
@@ -802,7 +808,6 @@ void GeneralRateModelDG::consistentInitialTimeDerivative(const SimulationTime& s
  */
 void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTime, double* const vecStateY, const AdJacobianParams& adJac, double errorTol, util::ThreadLocalStorage& threadLocalMem)
 {
-	// @todo
 	if (isSectionDependent(_parDiffusionMode) || isSectionDependent(_parSurfDiffusionMode))
 		LOG(Warning) << "Lean consistent initialization is not appropriate for section-dependent pore and surface diffusion";
 
@@ -863,7 +868,7 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
  *          The process works in two steps:
  *          <ol>
  *              <li>Keep state and time derivative vectors as they are (i.e., do not solve algebraic equations).
- *                 Only solve for the fluxes @f$ j_{f,i} @f$ (only linear equations).</li>
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG)</li>
  *              <li>Compute the time derivatives of the state @f$ \dot{y} @f$ such that the residual is 0 in the column
  *                 bulk and flux blocks. The resulting equations are stated below:
  *                 @f[ \begin{align}
@@ -879,8 +884,7 @@ void GeneralRateModelDG::leanConsistentInitialState(const SimulationTime& simTim
  *     of @f$ \dot{y} @f$ for the bulk block and 0 for the flux block.
  *
  *     The linear system is solved by backsubstitution. First, the bulk block is solved.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     bulk block and the unchanged particle block time derivative vectors.</li>
+ *     No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG)</li>
  *          </ol>
  *     This function performs step 2. See leanConsistentInitialState() for step 1.
  *
@@ -978,8 +982,7 @@ void GeneralRateModelDG::initializeSensitivityStates(const std::vector<double*>&
  *          with respect to @f$ p @f$: @f$ s_0 = \frac{\partial y_0}{\partial p} @f$ and @f$ \dot{s}_0 = \frac{\partial \dot{y}_0}{\partial p}. @f$
  *          <ol>
  *              <li>Solve all algebraic equations in the model (e.g., quasi-stationary isotherms, reaction equilibria).
- *                 Once all @f$ c_i @f$, @f$ c_{p,i} @f$, and @f$ q_i^{(j)} @f$ have been computed, solve for the
- *                 fluxes @f$ j_{f,i} @f$. Let @f$ \mathcal{I}_a @f$ be the index set of algebraic equations, then, at this point, we have
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG). Let @f$ \mathcal{I}_a @f$ be the index set of algebraic equations, then, at this point, we have
  *                 \f[ \left( \frac{\partial F}{\partial y}(t, y_0, \dot{y}_0) s + \frac{\partial F}{\partial p}(t, y_0, \dot{y}_0) \right)_{\mathcal{I}_a} = 0. \f]</li>
  *              <li>Compute the time derivatives of the sensitivity @f$ \dot{s} @f$ such that the differential equations hold.
  *                 However, because of the algebraic equations, we need additional conditions to fully determine
@@ -1005,8 +1008,7 @@ void GeneralRateModelDG::initializeSensitivityStates(const std::vector<double*>&
  *     which is 0 for algebraic equations (@f$ -\frac{\partial^2 F}{\partial t \partial p}@f$, to be more precise).
  *
  *     The linear system is solved by backsubstitution. First, the diagonal blocks are solved in parallel.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     diagonal blocks.</li>
+ *     No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *          </ol>
  *     This function requires the parameter sensitivities to be computed beforehand and up-to-date Jacobians.
  * @param [in] simTime Simulation time information (time point, section index, pre-factor of time derivatives)
@@ -1019,184 +1021,176 @@ void GeneralRateModelDG::initializeSensitivityStates(const std::vector<double*>&
 void GeneralRateModelDG::consistentInitialSensitivity(const SimulationTime& simTime, const ConstSimulationState& simState,
 	std::vector<double*>& vecSensY, std::vector<double*>& vecSensYdot, active const* const adRes, util::ThreadLocalStorage& threadLocalMem)
 {
-	// @TODO?
-//	BENCH_SCOPE(_timerConsistentInit);
-//
-//	Indexer idxr(_disc);
-//
-//	for (std::size_t param = 0; param < vecSensY.size(); ++param)
-//	{
-//		double* const sensY = vecSensY[param];
-//		double* const sensYdot = vecSensYdot[param];
-//
-//		// Copy parameter derivative dF / dp from AD and negate it
-//		for (unsigned int i = _disc.nComp; i < numDofs(); ++i)
-//			sensYdot[i] = -adRes[i].getADValue(param);
-//
-//		// Step 1: Solve algebraic equations
-//
-//		// Step 1a: Compute quasi-stationary binding model state
-//		for (unsigned int type = 0; type < _disc.nParType; ++type)
-//		{
-//			if (!_binding[type]->hasQuasiStationaryReactions())
-//				continue;
-//
-//			int const* const qsMask = _binding[type]->reactionQuasiStationarity();
-//			const linalg::ConstMaskArray mask{ qsMask, static_cast<int>(_disc.strideBound[type]) };
-//			const int probSize = linalg::numMaskActive(mask);
-//
-//#ifdef CADET_PARALLELIZE
-//			BENCH_SCOPE(_timerConsistentInitPar);
-//			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol), [&](std::size_t pblk)
-//#else
-//			for (unsigned int pblk = 0; pblk < _disc.nCol; ++pblk)
-//#endif
-//			{
-//				// Reuse memory of band matrix for dense matrix
-//				linalg::DenseMatrixView jacobianMatrix(_jacPdisc[type * _disc.nCol + pblk].data(), _jacPdisc[type * _disc.nCol + pblk].pivot(), probSize, probSize);
-//
-//				// Get workspace memory
-//				LinearBufferAllocator tlmAlloc = threadLocalMem.get();
-//
-//				BufferedArray<double> rhsBuffer = tlmAlloc.array<double>(probSize);
-//				double* const rhs = static_cast<double*>(rhsBuffer);
-//
-//				BufferedArray<double> rhsUnmaskedBuffer = tlmAlloc.array<double>(idxr.strideParBound(type));
-//				double* const rhsUnmasked = static_cast<double*>(rhsUnmaskedBuffer);
-//
-//				double* const maskedMultiplier = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
-//				double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
-//
-//				for (unsigned int shell = 0; shell < _disc.nParCell[type]; ++shell)
-//				{
-//					const int jacRowOffset = static_cast<int>(shell) * idxr.strideParShell(type) + _disc.nComp;
-//					const int localQOffset = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) }) + static_cast<int>(shell) * idxr.strideParShell(type) + idxr.strideParLiquid();
-//
-//					// Extract subproblem Jacobian from full Jacobian
-//					jacobianMatrix.setAll(0.0);
-//					linalg::copyMatrixSubset(_jacP[type * _disc.nCol + pblk], mask, mask, jacRowOffset, 0, jacobianMatrix);
-//
-//					// Construct right hand side
-//					linalg::selectVectorSubset(sensYdot + localQOffset, mask, rhs);
-//
-//					// Zero out masked elements
-//					std::copy_n(sensY + localQOffset - idxr.strideParLiquid(), idxr.strideParShell(type), maskedMultiplier);
-//					linalg::fillVectorSubset(maskedMultiplier + _disc.nComp, mask, 0.0);
-//
-//					// Assemble right hand side
-//					_jacP[type * _disc.nCol + pblk].submatrixMultiplyVector(maskedMultiplier, jacRowOffset, -static_cast<int>(_disc.nComp), _disc.strideBound[type], idxr.strideParShell(type), rhsUnmasked);
-//					linalg::vectorSubsetAdd(rhsUnmasked, mask, -1.0, 1.0, rhs);
-//
-//					// Precondition
-//					jacobianMatrix.rowScaleFactors(scaleFactors);
-//					jacobianMatrix.scaleRows(scaleFactors);
-//
-//					// Solve
-//					jacobianMatrix.factorize();
-//					jacobianMatrix.solve(scaleFactors, rhs);
-//
-//					// Write back
-//					linalg::applyVectorSubset(rhs, mask, sensY + localQOffset);
-//				}
-//			} CADET_PARFOR_END;
-//		}
-//
-//		// Step 1b: Compute fluxes j_f, right hand side is -dF / dp
-//		std::copy(sensYdot + idxr.offsetJf(), sensYdot + numDofs(), sensY + idxr.offsetJf());
-//
-//		solveForFluxes(sensY, idxr);
-//
-//		// Step 2: Compute the correct time derivative of the state vector
-//
-//		// Step 2a: Assemble, factorize, and solve diagonal blocks of linear system
-//
-//		// Compute right hand side by adding -dF / dy * s = -J * s to -dF / dp which is already stored in sensYdot
-//		multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, sensYdot);
-//
-//		// Note that we have correctly negated the right hand side
-//
-//		// Handle bulk block
-//		_convDispOp.solveTimeDerivativeSystem(simTime, sensYdot + idxr.offsetC());
-//
-//		// Process the particle blocks
-//#ifdef CADET_PARALLELIZE
-//		BENCH_START(_timerConsistentInitPar);
-//		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nCol * _disc.nParType), [&](std::size_t pblk)
-//#else
-//		for (unsigned int pblk = 0; pblk < _disc.nCol * _disc.nParType; ++pblk)
-//#endif
-//		{
-//			const unsigned int type = pblk / _disc.nCol;
-//			const unsigned int par = pblk % _disc.nCol;
-//
-//			// Assemble
-//			linalg::FactorizableBandMatrix& fbm = _jacPdisc[pblk];
-//			fbm.setAll(0.0);
-//
-//			linalg::FactorizableBandMatrix::RowIterator jac = fbm.row(0);
-//			for (unsigned int j = 0; j < _disc.nParCell[type]; ++j)
-//			{
-//				// Populate matrix with time derivative Jacobian first
-//				addTimeDerivativeToJacobianParticleShell(jac, idxr, 1.0, type);
-//				// Iterator jac has already been advanced to next shell
-//
-//				// Overwrite rows corresponding to algebraic equations with the Jacobian and set right hand side to 0
-//				if (_binding[type]->hasQuasiStationaryReactions())
-//				{
-//					// Get iterators to beginning of solid phase
-//					linalg::BandMatrix::RowIterator jacSolidOrig = _jacP[pblk].row(j * static_cast<unsigned int>(idxr.strideParShell(type)) + static_cast<unsigned int>(idxr.strideParLiquid()));
-//					linalg::FactorizableBandMatrix::RowIterator jacSolid = jac - idxr.strideParBound(type);
-//
-//					int const* const mask = _binding[type]->reactionQuasiStationarity();
-//					double* const qShellDot = sensYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) + static_cast<int>(j) * idxr.strideParShell(type) + idxr.strideParLiquid();
-//
-//					// Copy row from original Jacobian and set right hand side
-//					for (int i = 0; i < idxr.strideParBound(type); ++i, ++jacSolid, ++jacSolidOrig)
-//					{
-//						if (!mask[i])
-//							continue;
-//
-//						jacSolid.copyRowFrom(jacSolidOrig);
-//
-//						// Right hand side is -\frac{\partial^2 res(t, y, \dot{y})}{\partial p \partial t}
-//						// If the residual is not explicitly depending on time, this expression is 0
-//						// @todo This is wrong if external functions are used. Take that into account!
-//						qShellDot[i] = 0.0;
-//					}
-//				}
-//			}
-//
-//			// Precondition
-//			double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par });
-//			fbm.rowScaleFactors(scaleFactors);
-//			fbm.scaleRows(scaleFactors);
-//
-//			// Factorize
-//			const bool result = fbm.factorize();
-//			if (!result)
-//			{
-//				LOG(Error) << "Factorize() failed for par block " << pblk << " (type " << type << " col " << par << ")";
-//			}
-//
-//			// Solve
-//			const bool result2 = fbm.solve(scaleFactors, sensYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }));
-//			if (!result2)
-//			{
-//				LOG(Error) << "Solve() failed for par block " << pblk << " (type " << type << " col " << par << ")";
-//			}
-//		} CADET_PARFOR_END;
-//
-//#ifdef CADET_PARALLELIZE
-//		BENCH_STOP(_timerConsistentInitPar);
-//#endif
-//
-//		// TODO: Right hand side for fluxes should be -d^2res/(dp dy) * \dot{y}
-//		// If parameters depend on time, then it should be
-//		// -d^2res/(dp dy) * \dot{y} - d^2res/(dt dy) * s - d^2res/(dp dt)
-//
-//		// Step 2b: Solve for fluxes j_f by backward substitution
-//		solveForFluxes(sensYdot, idxr);
-//	}
+	BENCH_SCOPE(_timerConsistentInit);
+
+	Indexer idxr(_disc);
+
+	for (std::size_t param = 0; param < vecSensY.size(); ++param)
+	{
+		double* const sensY = vecSensY[param];
+		double* const sensYdot = vecSensYdot[param];
+
+		// Copy parameter derivative dF / dp from AD and negate it
+		for (unsigned int i = _disc.nComp; i < numDofs(); ++i)
+			sensYdot[i] = -adRes[i].getADValue(param);
+
+		// Step 1: Solve algebraic equations
+
+		// Step 1a: Compute quasi-stationary binding model state
+		for (unsigned int type = 0; type < _disc.nParType; ++type)
+		{
+			if (!_binding[type]->hasQuasiStationaryReactions())
+				continue;
+
+			int const* const qsMask = _binding[type]->reactionQuasiStationarity();
+			const linalg::ConstMaskArray mask{ qsMask, static_cast<int>(_disc.strideBound[type]) };
+			const int probSize = linalg::numMaskActive(mask);
+
+#ifdef CADET_PARALLELIZE
+			BENCH_SCOPE(_timerConsistentInitPar);
+			tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints), [&](std::size_t pblk)
+#else
+			for (unsigned int pblk = 0; pblk < _disc.nPoints; ++pblk)
+#endif
+			{
+				// Reuse memory of band matrix for dense matrix
+				linalg::DenseMatrixView jacobianMatrix(_globalJacDisc.valuePtr() + _globalJacDisc.outerIndexPtr()[idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) }) - idxr.offsetC()] + pblk * probSize * probSize, nullptr, probSize, probSize);
+
+				// Get workspace memory
+				LinearBufferAllocator tlmAlloc = threadLocalMem.get();
+
+				BufferedArray<double> rhsBuffer = tlmAlloc.array<double>(probSize);
+				double* const rhs = static_cast<double*>(rhsBuffer);
+
+				BufferedArray<double> rhsUnmaskedBuffer = tlmAlloc.array<double>(idxr.strideParBound(type));
+				double* const rhsUnmasked = static_cast<double*>(rhsUnmaskedBuffer);
+
+				double* const maskedMultiplier = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
+				double* const scaleFactors = _tempState + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) });
+
+				for (unsigned int shell = 0; shell < _disc.nParPoints[type]; ++shell)
+				{
+					const int jacRowOffset = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) }) + static_cast<int>(shell) * idxr.strideParNode(type) + _disc.nComp;
+					const int jacColOffset = jacRowOffset;
+					const int localQOffset = idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ static_cast<unsigned int>(pblk) }) + static_cast<int>(shell) * idxr.strideParNode(type) + idxr.strideParLiquid();
+
+					// Extract subproblem Jacobian from full Jacobian
+					jacobianMatrix.setAll(0.0);
+					linalg::copyMatrixSubset(_globalJac, mask, mask, jacRowOffset, jacColOffset, jacobianMatrix);
+
+					// Construct right hand side
+					linalg::selectVectorSubset(sensYdot + localQOffset, mask, rhs);
+
+					// Zero out masked elements
+					std::copy_n(sensY + localQOffset - idxr.strideParLiquid(), idxr.strideParNode(type), maskedMultiplier);
+					linalg::fillVectorSubset(maskedMultiplier + _disc.nComp, mask, 0.0);
+
+					// Assemble right hand side
+					Eigen::Map<VectorXd> maskedMultiplier_eigen(maskedMultiplier, idxr.strideParBlock(type));
+					Eigen::Map<VectorXd> rhsUnmasked_eigen(rhsUnmasked, idxr.strideParBlock(type));
+					rhsUnmasked_eigen = _globalJac.block(jacRowOffset, jacColOffset, idxr.strideParBlock(type), idxr.strideParBlock(type)) * maskedMultiplier_eigen;
+					linalg::vectorSubsetAdd(rhsUnmasked, mask, -1.0, 1.0, rhs);
+
+					// Precondition
+					jacobianMatrix.rowScaleFactors(scaleFactors);
+					jacobianMatrix.scaleRows(scaleFactors);
+
+					// Solve
+					jacobianMatrix.factorize();
+					jacobianMatrix.solve(scaleFactors, rhs);
+
+					// Write back
+					linalg::applyVectorSubset(rhs, mask, sensY + localQOffset);
+				}
+			} CADET_PARFOR_END;
+		}
+
+		// Step 1: Compute the correct time derivative of the state vector
+
+		// Step 1a: Assemble, factorize, and solve diagonal blocks of linear system
+
+		// Compute right hand side by adding -dF / dy * s = -J * s to -dF / dp which is already stored in sensYdot
+		multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, sensYdot);
+
+		// Note that we have correctly negated the right hand side
+
+		// Assemble bulk block
+		double* vPtr = _globalJacDisc.valuePtr();
+		for (int k = 0; k < _globalJacDisc.nonZeros(); k++) {
+			vPtr[k] = 0.0;
+		}
+		_convDispOp.addTimeDerivativeToJacobian(1.0, _globalJacDisc, idxr.offsetC());
+
+		// Process the particle blocks
+#ifdef CADET_PARALLELIZE
+		BENCH_START(_timerConsistentInitPar);
+		tbb::parallel_for(std::size_t(0), static_cast<std::size_t>(_disc.nPoints * _disc.nParType), [&](std::size_t pblk)
+#else
+		for (unsigned int pblk = 0; pblk < _disc.nPoints * _disc.nParType; ++pblk)
+#endif
+		{
+			const unsigned int type = pblk / _disc.nPoints;
+			const unsigned int par = pblk % _disc.nPoints;
+
+			// Assemble
+			linalg::BandedEigenSparseRowIterator jacPar(_globalJacDisc, idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ static_cast<unsigned int>(pblk) }));
+
+			for (unsigned int j = 0; j < _disc.nParPoints[type]; ++j)
+			{
+				// Populate matrix with time derivative Jacobian first
+				addTimeDerivativeToJacobianParticleShell(jacPar, idxr, 1.0, type);
+				// Iterator jac has already been advanced to next shell
+
+				// Overwrite rows corresponding to algebraic equations with the Jacobian and set right hand side to 0
+				if (_binding[type]->hasQuasiStationaryReactions())
+				{
+					// Get iterators to beginning of solid phase
+					linalg::BandedEigenSparseRowIterator jacSolidOrig(_globalJac, idxr.offsetCp(ParticleTypeIndex{ static_cast<unsigned int>(type) }, ParticleIndex{ static_cast<unsigned int>(pblk) }) + j * idxr.strideParNode(type) + idxr.strideParLiquid());
+					linalg::BandedEigenSparseRowIterator jacSolid = jacPar - idxr.strideParBound(type);
+
+					int const* const mask = _binding[type]->reactionQuasiStationarity();
+					double* const qShellDot = sensYdot + idxr.offsetCp(ParticleTypeIndex{ type }, ParticleIndex{ par }) + static_cast<int>(j) * idxr.strideParNode(type) + idxr.strideParLiquid();
+
+					// Copy row from original Jacobian and set right hand side
+					for (int i = 0; i < idxr.strideParBound(type); ++i, ++jacSolid, ++jacSolidOrig)
+					{
+						if (!mask[i])
+							continue;
+
+						jacSolid.copyRowFrom(jacSolidOrig);
+
+						// Right hand side is -\frac{\partial^2 res(t, y, \dot{y})}{\partial p \partial t}
+						// If the residual is not explicitly depending on time, this expression is 0
+						// @todo This is wrong if external functions are used. Take that into account!
+						qShellDot[i] = 0.0;
+					}
+				}
+			}
+
+		} CADET_PARFOR_END;
+
+		Eigen::Map<VectorXd> yDot(sensYdot, numPureDofs());
+
+		// Factorize
+		_globalSolver.factorize(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
+
+		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+		{
+			LOG(Error) << "Factorize() failed";
+		}
+		// Solve
+		yDot.segment(0, numPureDofs()) = _globalSolver.solve(yDot.segment(0, numPureDofs()));
+
+		if (cadet_unlikely(_globalSolver.info() != Eigen::Success))
+		{
+			LOG(Error) << "Solve() failed";
+		}
+
+#ifdef CADET_PARALLELIZE
+		BENCH_STOP(_timerConsistentInitPar);
+#endif
+
+	}
 }
 
 void GeneralRateModelDG::solveBulkTimeDerivativeSystem(const SimulationTime& simTime, double* const rhs) {
@@ -1236,7 +1230,7 @@ void GeneralRateModelDG::solveBulkTimeDerivativeSystem(const SimulationTime& sim
 	}
 
 	// reset linear solver to global Jacobian
-	_globalSolver.analyzePattern(_globalJacDisc);
+	_globalSolver.analyzePattern(_globalJacDisc.block(idxr.offsetC(), idxr.offsetC(), numPureDofs(), numPureDofs()));
 }
 
 /**
@@ -1254,7 +1248,7 @@ void GeneralRateModelDG::solveBulkTimeDerivativeSystem(const SimulationTime& sim
  *          with respect to @f$ p @f$: @f$ s_0 = \frac{\partial y_0}{\partial p} @f$ and @f$ \dot{s}_0 = \frac{\partial \dot{y}_0}{\partial p}. @f$
  *          <ol>
  *              <li>Keep state and time derivative vectors as they are (i.e., do not solve algebraic equations).
- *                 Only solve for the fluxes @f$ j_{f,i} @f$ (only linear equations).</li>
+ *                 No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *              <li>Compute the time derivatives of the sensitivity @f$ \dot{s} @f$ such that the differential equations hold.
  *                 However, because of the algebraic equations, we need additional conditions to fully determine
  *                 @f$ \dot{s}@f$. By differentiating the algebraic equations with respect to time, we get the
@@ -1274,8 +1268,7 @@ void GeneralRateModelDG::solveBulkTimeDerivativeSystem(const SimulationTime& sim
  *     which is 0 for algebraic equations (@f$ -\frac{\partial^2 F}{\partial t \partial p}@f$, to be more precise).
  *
  *     The linear system is solved by backsubstitution. First, the bulk block is solved.
- *     Then, the equations for the fluxes @f$ j_f @f$ are solved by substituting in the solution of the
- *     bulk block and the unchanged particle block time derivative vectors.</li>
+ *     No need to solve for fluxes @f$ j_{f,i} @f$ (since they are not part of the state for DG).</li>
  *          </ol>
  *     This function requires the parameter sensitivities to be computed beforehand and up-to-date Jacobians.
  * @param [in] simTime Simulation time information (time point, section index, pre-factor of time derivatives)
@@ -1308,7 +1301,7 @@ void GeneralRateModelDG::leanConsistentInitialSensitivity(const SimulationTime& 
 		std::fill(_tempState + idxr.offsetCp(), _tempState + numDofs(), 0.0);
 
 		// Step 2: Compute the correct time derivative of the state vector, i.e.
-		// assemble, factorize, and solve diagonal blocks of linear system
+		// assemble, factorize, and solve linear system
 
 		// Compute right hand side by adding -dF / dy * s = -J * s to -dF / dp which is already stored in _tempState
 		multiplyWithJacobian(simTime, simState, sensY, -1.0, 1.0, _tempState);

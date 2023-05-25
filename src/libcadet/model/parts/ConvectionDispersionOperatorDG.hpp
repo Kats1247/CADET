@@ -99,7 +99,7 @@ public:
 	void convDispJacPattern(std::vector<T>& tripletList, const int bulkOffset = 0);
 	unsigned int AxialConvectionDispersionOperatorBaseDG::nConvDispEntries(bool pureNNZ = false);
 	void multiplyWithDerivativeJacobian(const SimulationTime& simTime, double const* sDot, double* ret) const;
-	void addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc);
+	void addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc, unsigned int blockOffset = 0);
 
 	inline const active& columnLength() const CADET_NOEXCEPT { return _colLength; }
 	inline const active& currentVelocity(double pos) const CADET_NOEXCEPT { return _curVelocity; }

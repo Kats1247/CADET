@@ -530,10 +530,10 @@ void AxialConvectionDispersionOperatorBaseDG::multiplyWithDerivativeJacobian(con
  *          The factor @f$ \alpha @f$ is useful when constructing the linear system in the time integration process.
  * @param [in] alpha Factor in front of @f$ \frac{\partial F}{\partial \dot{y}} @f$
  */
-void AxialConvectionDispersionOperatorBaseDG::addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc)
+void AxialConvectionDispersionOperatorBaseDG::addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc, unsigned int blockOffset)
 {
 	const int gapCell = strideColNode() - static_cast<int>(_nComp) * strideColComp();
-	linalg::BandedEigenSparseRowIterator jac(jacDisc, 0);
+	linalg::BandedEigenSparseRowIterator jac(jacDisc, blockOffset);
 
 	for (unsigned int point = 0; point < _nPoints; ++point, jac+=gapCell) {
 		for (unsigned int comp = 0; comp < _nComp; ++comp, ++jac) {
