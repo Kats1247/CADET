@@ -21,7 +21,7 @@
 #include "ParamIdUtil.hpp"
 #include "AutoDiff.hpp"
 #include "Memory.hpp"
-//#include "Weno.hpp" // todo weno DG
+#include "Weno_DG.hpp"
 #include "SimulationTypes.hpp"
 #include <ParamReaderHelper.hpp>
 #include "linalg/BandedEigenSparseRowIterator.hpp"
@@ -124,7 +124,16 @@ public:
 	inline unsigned int nNodes() const CADET_NOEXCEPT { return _nNodes; }
 	inline unsigned int nPoints() const CADET_NOEXCEPT { return _nPoints; }
 	inline bool exactInt() const CADET_NOEXCEPT { return _exactInt; }
-	//inline const Weno& weno() const CADET_NOEXCEPT { return _weno; } // todo weno
+	inline bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return static_cast<bool>(_OSmode); } // only zero if no oscillation suppression
+	inline double* smoothnessIndicator() const CADET_NOEXCEPT
+	{ 
+		if (_OSmode == 1)
+			return _weno.troubledCells();
+		//else if (_OSmode == 2) // todo subcell limiting
+		//	return _subcell.troubledCells();
+		else
+			return nullptr;
+	}
 
 	// Indexer functionality:
 	// Strides
@@ -179,6 +188,11 @@ protected:
 	Eigen::Vector<active, Eigen::Dynamic> _h; //!< auxiliary substitute
 	Eigen::Vector<active, Eigen::Dynamic> _surfaceFlux; //!< stores the surface flux values
 	Eigen::Vector<active, 4> _boundary; //!< stores the boundary values from Danckwert boundary conditions
+
+	// non-linear oscillation prevention mechanism
+	int _OSmode; //!< oscillation suppression mode; 0 : none, 1 : WENO, 2 : Subcell limiting
+	WenoDG _weno; //!< WENO operator
+	//SucellLimiter _subcellLimiter; // todo
 
 	// Simulation parameters
 	active _colLength; //!< Column length \f$ L \f$
