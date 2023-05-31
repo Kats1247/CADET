@@ -100,7 +100,7 @@ void extractBandedEigenJacobianFromAd(active const* const adVec, int adDirOffset
 }
 
 void extractBandedBlockEigenJacobianFromAd(active const* const adVec, int adDirOffset, int diagDir, const int lowerBandwidth, const int upperBandwidth,
-	const int blockOffset, const int nCols, Eigen::SparseMatrix<double, Eigen::RowMajor>& mat)
+	const int blockOffset, const int nCols, Eigen::SparseMatrix<double, Eigen::RowMajor>& mat, const int matrixOffset)
 {
 	const int stride = lowerBandwidth + 1 + upperBandwidth;
 	for (int eq = blockOffset; eq < blockOffset + nCols; ++eq)
@@ -117,7 +117,7 @@ void extractBandedBlockEigenJacobianFromAd(active const* const adVec, int adDirO
 				eq - lowerBandwidth + diag < blockOffset + nCols && // right block boundary
 				adVec[eq].getADValue(adDirOffset + dir) != 0.0 // keep pattern
 				)
-				mat.coeffRef(eq, eq - lowerBandwidth + diag) = adVec[eq].getADValue(adDirOffset + dir);
+				mat.coeffRef(matrixOffset + eq, matrixOffset + eq - lowerBandwidth + diag) = adVec[eq].getADValue(adDirOffset + dir);
 
 			// Wrap around at end of row and jump to lowest subdiagonal
 			if (dir == diagDir + upperBandwidth)

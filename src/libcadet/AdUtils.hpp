@@ -80,7 +80,7 @@ void extractBandedJacobianFromAd(active const* const adVec, int adDirOffset, int
  * @param [out] mat Eigen matrix to be populated with the Jacobian block
  */
 void extractBandedBlockEigenJacobianFromAd(active const* const adVec, int adDirOffset, int diagDir, const int lowerBandwidth, const int upperBandwidth,
-	const int blockOffset, const int nCols, Eigen::SparseMatrix<double, Eigen::RowMajor>& mat);
+	const int blockOffset, const int nCols, Eigen::SparseMatrix<double, Eigen::RowMajor>& mat, const int matrixOffset = 0);
 /**
  * @brief Extracts a band matrix (Eigen lib) from band compressed AD seed vectors
  * @details Uses the results of an AD computation with seed vectors set by prepareAdVectorSeedsForBandMatrix() to
