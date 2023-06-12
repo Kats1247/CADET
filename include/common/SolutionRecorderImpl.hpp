@@ -379,31 +379,6 @@ public:
 	}
 
 	template <typename Writer_t>
-	void writeSmoothnessIndicator(Writer_t& writer)
-	{
-		if (!_storeSmoothnessIndicator)
-			return;
-
-		std::ostringstream oss;
-
-		oss.str("");
-		oss << "SMOOTHNESS_INDICATOR";
-
-		std::vector<std::size_t> layout(0);
-		layout.reserve(4);
-		layout.push_back(_numTimesteps);
-
-		if (_nAxialPoints > 0)
-			layout.push_back(_nAxialPoints / (_axialPolyDeg + 1));
-		layout.push_back(_nComp);
-
-		debugCheckTensorLayout(layout, _smoothnessIndicator.size());
-
-		writer.template tensor<double>(oss.str(), layout.size(), layout.data(), _smoothnessIndicator.data());
-
-	}
-
-	template <typename Writer_t>
 	void writeSolution(Writer_t& writer)
 	{
 		std::ostringstream oss;
@@ -1168,25 +1143,6 @@ public:
 			{
 				writer.pushGroup(oss.str());
 				rec->writeCoordinates(writer);
-				writer.popGroup();
-			}
-		}
-	}
-	
-	template <typename Writer_t>
-	void writeSmoothnessIndicator(Writer_t& writer)
-	{
-		std::ostringstream oss;
-
-		for (InternalStorageUnitOpRecorder* rec : _recorders)
-		{
-			if (rec->storeSmoothnessIndicator())
-			{
-				oss.str("");
-				oss << "unit_" << std::setfill('0') << std::setw(3) << std::setprecision(0) << static_cast<int>(rec->unitOperation());
-
-				writer.pushGroup(oss.str());
-				rec->writeSmoothnessIndicator(writer);
 				writer.popGroup();
 			}
 		}

@@ -97,7 +97,7 @@ public:
 	int calcStaticAnaJacobian(Eigen::SparseMatrix<double, Eigen::RowMajor>& jacobian, Eigen::MatrixXd& jacInlet, const int bulkOffset = 0);
 	typedef Eigen::Triplet<double> T;
 	void convDispJacPattern(std::vector<T>& tripletList, const int bulkOffset = 0);
-	unsigned int AxialConvectionDispersionOperatorBaseDG::nConvDispEntries(bool pureNNZ = false);
+	unsigned int nConvDispEntries(bool pureNNZ = false);
 	void multiplyWithDerivativeJacobian(const SimulationTime& simTime, double const* sDot, double* ret) const;
 	void addTimeDerivativeToJacobian(double alpha, Eigen::SparseMatrix<double, Eigen::RowMajor>& jacDisc, unsigned int blockOffset = 0);
 
@@ -126,7 +126,7 @@ public:
 	inline bool exactInt() const CADET_NOEXCEPT { return _exactInt; }
 	inline bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return static_cast<bool>(_OSmode); } // only zero if no oscillation suppression
 	inline double* smoothnessIndicator() const CADET_NOEXCEPT
-	{ 
+	{
 		if (_OSmode == 1)
 			return _weno.troubledCells();
 		//else if (_OSmode == 2) // todo subcell limiting
