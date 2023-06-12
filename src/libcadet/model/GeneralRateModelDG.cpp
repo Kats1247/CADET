@@ -1419,7 +1419,7 @@ int GeneralRateModelDG::residualParticle(double t, unsigned int parType, unsigne
 					// compute g_s = d c_s / d xi
 					solve_auxiliary_DG<StateType>(parType, q_p, strideCell, strideNode, comp);
 					// apply invBeta_p, d_s and add to sum -> gSum += d_s * invBeta_p * (D c - M^-1 B [c - c^*])
-					_g_pSum += _g_p.cast<ResidualType>() * invBetaP * static_cast<ParamType>(_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]);
+					_g_pSum += _g_p.template cast<ResidualType>() * invBetaP * static_cast<ParamType>(_parSurfDiff[getOffsetSurfDiff(parType, comp, bnd)]);
 
 					/* For kinetic bindings with surface diffusion: add the additional DG-discretized particle mass balance equations to residual */
 
@@ -2004,8 +2004,8 @@ void GeneralRateModelDG::updateRadialDisc()
 
 			// (D_r)_{i, j} = D_{i, j} * (r_j / r_i) [only needed for inexact integration]
 			_disc.Dr[_disc.offsetMetric[parType] + cell] = _disc.parPolyDerM[parType];
-			_disc.Dr[_disc.offsetMetric[parType] + cell].array().rowwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().cast<double>().transpose();
-			_disc.Dr[_disc.offsetMetric[parType] + cell].array().colwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().cast<double>().cwiseInverse();
+			_disc.Dr[_disc.offsetMetric[parType] + cell].array().rowwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().template cast<double>().transpose();
+			_disc.Dr[_disc.offsetMetric[parType] + cell].array().colwise() *= _disc.Ir[_disc.offsetMetric[parType] + cell].array().template cast<double>().cwiseInverse();
 
 			// compute mass matrices for exact integration based on particle geometry, via transformation to normalized Jacobi polynomials with weight function w
 			if (_parGeomSurfToVol[parType] == SurfVolRatioSphere) { // w = (1 + \xi)^2

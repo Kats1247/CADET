@@ -148,9 +148,9 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 		 }
 		 else if (osMethod != "NONE")
-			throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
+			 throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
 
-		paramProvider.popScope();
+		 paramProvider.popScope();
 	}
 	paramProvider.popScope();
 
@@ -455,7 +455,7 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		if (yDot)
 		{
 			Eigen::Map<const VectorXd, 0, InnerStride<Dynamic>> _Cdot(yDot + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
-			_resC = _Cdot.cast<ResidualType>();
+			_resC = _Cdot.template cast<ResidualType>();
 		}
 		else
 			_resC.setZero();
@@ -490,7 +490,7 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// ======================================//
 
 		// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
-		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).cast<ResidualType>();
+		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 
 		// DG volume integral in strong form
 		volumeIntegral<ResidualType, ResidualType>(_h, _resC);

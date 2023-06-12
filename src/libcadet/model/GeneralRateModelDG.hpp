@@ -960,14 +960,14 @@ protected:
 			// comp-cell-node state vector: use of Eigen lib performance
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				stateDer.segment(Cell * nNodes, nNodes)
-					-= (_disc.parPolyDerM[parType].cast<StateType>() * state.segment(Cell * nNodes, nNodes)).cast<ResidualType>();
+					-= (_disc.parPolyDerM[parType].template cast<StateType>() * state.segment(Cell * nNodes, nNodes)).template cast<ResidualType>();
 			}
 		}
 		else if (_disc.parExactInt[parType] && _parGeomSurfToVol[parType] != _disc.SurfVolRatioSlab) {
 			// comp-cell-node state vector: use of Eigen lib performance
 			for (unsigned int Cell = 0; Cell < _disc.nParCell[parType]; Cell++) {
 				stateDer.segment(Cell * nNodes, nNodes)
-					-= (_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + Cell].cast<StateType>() * state.segment(Cell * nNodes, nNodes)).cast<ResidualType>();
+					-= (_disc.minus_InvMM_ST[_disc.offsetMetric[parType] + Cell].template cast<StateType>() * state.segment(Cell * nNodes, nNodes)).template cast<ResidualType>();
 			}
 		}
 		/* include metrics for main particle equation -> res = - D * (d_p * c^p + invBeta_p sum_mi d_s c^s) */
@@ -980,20 +980,20 @@ protected:
 				Cell0 = 1;
 
 				// estimate volume integral except for boundary node
-				stateDer.segment(1, nNodes - 1) -= (_disc.Dr[_disc.offsetMetric[parType]].block(1, 1, nNodes - 1, nNodes - 1).cast<StateType>() * state.segment(1, nNodes - 1)).cast<ResidualType>();
+				stateDer.segment(1, nNodes - 1) -= (_disc.Dr[_disc.offsetMetric[parType]].block(1, 1, nNodes - 1, nNodes - 1).template cast<StateType>() * state.segment(1, nNodes - 1)).template cast<ResidualType>();
 				// estimate volume integral for boundary node: sum_{j=1}^N state_j * w_j * D_{j,0} * r_j
 				stateDer[0] += static_cast<ResidualType>(
 					(state.segment(1, nNodes - 1).array()
-					* _disc.parInvWeights[parType].segment(1, nNodes - 1).array().cwiseInverse().cast<StateType>()
-					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1).array().cast<StateType>()
-					* _disc.Ir[_disc.offsetMetric[parType]].segment(1, nNodes - 1).array().cast<StateType>()
+					* _disc.parInvWeights[parType].segment(1, nNodes - 1).array().cwiseInverse().template cast<StateType>()
+					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1).array().template cast<StateType>()
+					* _disc.Ir[_disc.offsetMetric[parType]].segment(1, nNodes - 1).array().template cast<StateType>()
 					).sum()
 					);
 			}
 
 			// "standard" computation for remaining cells
 			for (int cell = Cell0; cell < _disc.nParCell[parType]; cell++) {
-				stateDer.segment(cell * nNodes, nNodes) -= (_disc.Dr[_disc.offsetMetric[parType] + cell].cast<StateType>() * state.segment(cell * nNodes, nNodes)).cast<ResidualType>();
+				stateDer.segment(cell * nNodes, nNodes) -= (_disc.Dr[_disc.offsetMetric[parType] + cell].template cast<StateType>() * state.segment(cell * nNodes, nNodes)).template cast<ResidualType>();
 			}
 		}
 	}
@@ -1892,7 +1892,7 @@ protected:
 
 				// inner boundary node
 				dispBlock.block(0, 0, 1, nNodes)
-					= -(_disc.Ir[parType].segment(1, nNodes - 1).cast<double>().cwiseProduct(
+					= -(_disc.Ir[parType].segment(1, nNodes - 1).template cast<double>().cwiseProduct(
 						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
 							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
 					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
@@ -1980,7 +1980,7 @@ protected:
 
 				// inner boundary node
 				bnd_dispBlock.block(0, 0, 1, nNodes + 1)
-					= -(_disc.Ir[_disc.offsetMetric[parType]].cast<double>().segment(1, nNodes - 1).cwiseProduct(
+					= -(_disc.Ir[_disc.offsetMetric[parType]].template cast<double>().segment(1, nNodes - 1).cwiseProduct(
 						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
 							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
 					* GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
@@ -2245,7 +2245,7 @@ protected:
 
 				// inner boundary node
 				dispBlock.block(0, 0, 1, nNodes)
-					= -(_disc.Ir[parType].segment(1, nNodes - 1).cast<double>().cwiseProduct(
+					= -(_disc.Ir[parType].segment(1, nNodes - 1).template cast<double>().cwiseProduct(
 						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
 							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
 					* _disc.parPolyDerM[parType].block(1, 0, nNodes - 1, nNodes);
@@ -2311,7 +2311,7 @@ protected:
 
 				// inner boundary node
 				bnd_dispBlock.block(0, 0, 1, nNodes + 1)
-					= -(_disc.Ir[_disc.offsetMetric[parType]].cast<double>().segment(1, nNodes - 1).cwiseProduct(
+					= -(_disc.Ir[_disc.offsetMetric[parType]].template cast<double>().segment(1, nNodes - 1).cwiseProduct(
 						_disc.parInvWeights[parType].segment(1, nNodes - 1).cwiseInverse()).cwiseProduct(
 							_disc.parPolyDerM[parType].block(1, 0, nNodes - 1, 1))).transpose()
 					* GBlock_l.block(1, 0, nNodes - 1, nNodes + 1);
