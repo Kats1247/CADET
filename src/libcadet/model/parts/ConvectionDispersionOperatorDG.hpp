@@ -21,7 +21,7 @@
 #include "ParamIdUtil.hpp"
 #include "AutoDiff.hpp"
 #include "Memory.hpp"
-#include "Weno_DG.hpp"
+#include "WenoDG.hpp"
 #include "SimulationTypes.hpp"
 #include <ParamReaderHelper.hpp>
 #include "linalg/BandedEigenSparseRowIterator.hpp"
@@ -129,8 +129,8 @@ namespace cadet
 				{
 					if (_OSmode == 1)
 						return _weno.troubledCells();
-					//else if (_OSmode == 2) // todo subcell limiting
-					//	return _subcell.troubledCells();
+					else if (_OSmode == 2)
+						return  _weno.troubledCells(); // todo use _subcell.troubledCells();
 					else
 						return nullptr;
 				}
@@ -184,6 +184,12 @@ namespace cadet
 				Eigen::MatrixXd* _DGjacAxDispBlocks; //!< Unique Jacobian blocks for axial dispersion
 				Eigen::MatrixXd _DGjacAxConvBlock; //!< Unique Jacobian blocks for axial convection
 
+				/* oscillation suppression */ // todo outsource to respectives approaches classes
+				// subcell limiting
+				Eigen::VectorXd _modalCoeff; //!< Orthonormal modal polynomial coefficients (used by smoothness indicator)
+				Eigen::MatrixXd _modalVanInv; //!< Inverse Vandermonde matrix of orthonormal modal polynomial coefficients (used by smoothness indicator)
+				Eigen::VectorXd _weights; //!< LGL quadrature weights
+
 				Eigen::Vector<active, Eigen::Dynamic> _g; //!< auxiliary variable
 				Eigen::Vector<active, Eigen::Dynamic> _h; //!< auxiliary substitute
 				Eigen::Vector<active, Eigen::Dynamic> _surfaceFlux; //!< stores the surface flux values
@@ -204,15 +210,9 @@ namespace cadet
 				active _curVelocity; //!< Current interstitial velocity \f$ u \f$ in this time section
 				int _dir; //!< Current flow direction in this time section
 
-				// needed?
+				// todo still needed?
 				int _curSection; //!< current section index
 				bool _newStaticJac; //!< determines wether static analytical jacobian needs to be computed (every section)
-
-				// todo weno
-				//ArrayPool _stencilMemory; //!< Provides memory for the stencil
-				//double* _wenoDerivatives; //!< Holds derivatives of the WENO scheme
-				//Weno _weno; //!< The WENO scheme implementation
-				//double _wenoEpsilon; //!< The @f$ \varepsilon @f$ of the WENO scheme (prevents division by zero)
 
 				bool _dispersionCompIndep; //!< Determines whether dispersion is component independent
 
@@ -346,6 +346,17 @@ namespace cadet
 					double b = 0.0;
 					return std::sqrt(((2.0 * n + a + b + 1.0) * std::tgamma(n + 1.0) * std::tgamma(n + a + b + 1.0))
 						/ (std::pow(2.0, a + b + 1.0) * std::tgamma(n + a + 1.0) * std::tgamma(n + b + 1.0)));
+				}
+
+				Eigen::MatrixXd getVandermonde_mode() {
+
+					Eigen::MatrixXd V = MatrixXd::Zero(_nodes.size(), _nodes.size());
+					for (int node = 0; node < _polyDeg; node++) {
+						for (int node2 = 0; node2 < _polyDeg; node2++) {
+							V(node, node2) = std::pow(_nodes[node], node2 + 1);
+						}
+					}
+					return V;
 				}
 
 				/**
@@ -755,6 +766,55 @@ namespace cadet
 									* (state[Cell * strideCell_state + _polyDeg * strideNode_state] - _surfaceFlux(Cell + 1)));
 						}
 					}
+				}
+
+				template<typename StateType, typename ResidualType, typename ParamType>
+				void subcellFVintegral(double blending, const StateType* _C, ResidualType* stateDer,
+					unsigned int strideNodeC, unsigned int strideNode_stateDer) {
+
+					const StateType* localC = _C;
+					ResidualType* localStateDer = stateDer;
+					ResidualType flux = 0.0;
+
+					for (unsigned int cell = 0; cell < _nCells; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+
+						//FVintegral<StateType, ResidualType, ParamType>(blending, cell, &_C[cell * (strideNodeC * _nNodes)], &stateDer[cell * (strideNode_stateDer * _nNodes)], strideNodeC, strideNode_stateDer);
+						
+						//if (!indicator) { // todo use indicator
+						//	localC +=
+						//		localStateDer +=
+						//		continue;
+						//}
+
+						// subcell faces
+						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+
+							flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]); // left value (upwind)
+
+							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
+							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
+						}
+					}
+
+					// DG element faces TODO: handle this by DG operation by bringing FV into a DG type form
+					// inlet boundary BC // todo backwards flow! (will be solved once DG operation is being used)
+					flux = blending * static_cast<ResidualType>(_curVelocity * _boundary[0]);
+					stateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+
+					// inner DG element faces
+					localC = _C + strideNodeC * (_nNodes - 1);
+					localStateDer = stateDer + strideNode_stateDer * (_nNodes - 1);
+
+					for (unsigned int elemFace = 1; elemFace < _nCells; elemFace++, localC += _nNodes * strideNodeC, localStateDer += _nNodes * strideNode_stateDer) {
+
+						flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]);
+						localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+						localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+					}
+					// outlet boundary BC // todo backwards flow! (will be solved once DG operation is being used)
+					flux = blending * static_cast<ResidualType>(_curVelocity * _C[_nCells * (strideNodeC * _nNodes) - strideNodeC]);
+					stateDer[_nCells * (strideNode_stateDer * _nNodes) - strideNode_stateDer] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+
 				}
 				/**
 				 * @brief computes ghost nodes to implement boundary conditions
