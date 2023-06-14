@@ -17,8 +17,6 @@
 #include "ParamReaderHelper.hpp"
 #include "AdUtils.hpp"
 #include "SimulationTypes.hpp"
-//#include "model/parts/AxialConvectionDispersionKernelDG.hpp" // todo radial flow DG and outsource residual implementation to kernel
-//#include "model/parts/RadialConvectionDispersionKernelDG.hpp"
 #include "model/ParameterDependence.hpp"
 #include "SensParamUtil.hpp"
 #include "ConfigurationHelper.hpp"
@@ -44,7 +42,6 @@ namespace parts
  * @brief Creates an AxialConvectionDispersionOperatorBaseDG
  */
 AxialConvectionDispersionOperatorBaseDG::AxialConvectionDispersionOperatorBaseDG() :
-	/*_stencilMemory(sizeof(active) * Weno::maxStencilSize()), _wenoDerivatives(new double[Weno::maxStencilSize()]), _weno(),*/ // todo weno
 	_dispersionDep(nullptr)
 {
 }
@@ -134,23 +131,33 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 			 double r = paramProvider.exists("WENO_R") ? paramProvider.getDouble("WENO_R") : 2.0;
 			 double gamma = paramProvider.exists("WENO_GAMMA") ? paramProvider.getDouble("WENO_GAMMA") : 0.998;
 			 bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
+			 std::string limiter = paramProvider.exists("WENO_LIMITER") ? paramProvider.getString("WENO_LIMITER") : "MINMOD";
 
-			 _weno.init(eps, r, gamma, _nCells, _nComp, write_smoothness_indicator);
+			 _weno.init(limiter, eps, r, gamma, _nCells, _nComp, write_smoothness_indicator);
 		 }
 		 else if (osMethod == "SUBCELL_LIMITING")
 		 {
 			 LOG(Debug) << "Subcell limiting used as oscillation suppression mechanism.";
 
 			 _OSmode = 2;
-			 int order = paramProvider.getInt("FV_ORDER");
-			 //  @TODO Subcell limiting
-			 throw InvalidParameterException("Oscillation suppression mechanism " + osMethod + " not implemented yet");
+			 int order = paramProvider.exists("FV_ORDER") ? paramProvider.getInt("FV_ORDER") : 1;
 
+			 _modalVanInv.resize(_nNodes, _nNodes);
+			 _modalVanInv.setZero();
+			 _modalVanInv = getVandermonde_LEGENDRE().inverse();
+			 _modalCoeff.resize(_nNodes);
+			 _modalCoeff.setZero();
+			 _weights.resize(_nNodes);
+			 _weights = _invWeights.cwiseInverse();
+
+			 //// todo: use subcell limiter class
+			 std::string limiter = "MINMOD";
+			 _weno.init(limiter, 1e-6, 2.0, 0.998, _nCells, _nComp, true);
 		 }
 		 else if (osMethod != "NONE")
-			 throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
+			throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
 
-		 paramProvider.popScope();
+		paramProvider.popScope();
 	}
 	paramProvider.popScope();
 
@@ -421,35 +428,68 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<>> _h(reinterpret_cast<ResidualType*>(&_h[0]), _nPoints, InnerStride<>(1));
 		Eigen::Map<Vector<StateType, Dynamic>, 0, InnerStride<>> _g(reinterpret_cast<StateType*>(&_g[0]), _nPoints, InnerStride<>(1));
 
-		////ResidualType _pAvg0 = reinterpret_cast<ResidualType>(_weno._pAvg0);
-		////ResidualType _pAvg1 = reinterpret_cast<ResidualType>(_weno._pAvg1);
-		////ResidualType _pAvg2 = reinterpret_cast<ResidualType>(_weno._pAvg2);
+		// calculate smoothness indicator, if oscillation suppression is active
+		if (_OSmode != 0)
+		{
+			if (_OSmode == 1) // WENO
+			{
+				for (unsigned int cell = 0; cell < _nCells; cell++)
+				{
+					_weno._troubled_cells[comp + cell * _nComp] = 0.0;
 
-		//// calculate smoothness indicator, if oscillation suppression is active
-		//if (_OSmode != 0)
-		//{
-		//	if (_OSmode == 1) // WENO
-		//	{
-		//		for (unsigned int cell = 0; cell < _nCells; cell++)
-		//		{
-		//			if (cell > 0 && cell < _nCells - 1) // todo boundary treatment
-		//			{
-		//				// todo store weights additionally to inverse
-		//				// todo overwrite values instead of recalculation
-		//				_weno._pAvg0 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().cast<StateType>().array() * _C.segment((cell - 1) * _nNodes, _nNodes).array()).sum();
-		//				_weno._pAvg1 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().cast<StateType>().array() * _C.segment(cell       * _nNodes, _nNodes).array()).sum();
-		//				_weno._pAvg2 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().cast<StateType>().array() * _C.segment((cell + 1) * _nNodes, _nNodes).array()).sum();
+					if (cell > 0 && cell < _nCells - 1) // todo boundary treatment
+					{
+						// todo store mass matrix and LGL weights additionally to respective inverse
+						// todo overwrite values instead of recalculation
+						_weno._pAvg0 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment((cell - 1) * _nNodes, _nNodes).array()).sum();
+						_weno._pAvg1 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment(cell * _nNodes, _nNodes).array()).sum();
+						_weno._pAvg2 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment((cell + 1) * _nNodes, _nNodes).array()).sum();
 
+						_weno._uTilde = _C[cell * _nNodes + _nNodes - 1] - _weno._pAvg1; // average minus inner interface value on right face
+						_weno._u2Tilde = _weno._pAvg1 - _C[cell * _nNodes]; // average minus inner interface value on left face
 
-		//				// mark troubled cell
-		//				if (true)
-		//				{
-		//					int hm = 0;
-		//				}
-		//			}
-		//		}
-		//	}
-		//}
+						double trigger1 = _weno.weno_limiter->call(_weno._uTilde, _weno._pAvg2 - _weno._pAvg1, _weno._pAvg1 - _weno._pAvg0);
+						double trigger2 = _weno.weno_limiter->call(_weno._u2Tilde, _weno._pAvg2 - _weno._pAvg1, _weno._pAvg1 - _weno._pAvg0);
+
+						double M2 = (_polyDerM * _polyDerM * _C.segment(cell * _nNodes, _nNodes).template cast<double>()).maxCoeff();
+						//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
+						double M_ = 2.0 / 3.0 * M2;
+						//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
+
+						// reconstruct if cell is troubled, i.e. potential oscillations
+						if (abs(trigger1 - _weno._uTilde) > 1e-8 || abs(trigger2 - _weno._u2Tilde) > 1e-8)
+						{
+							if (abs(_weno._uTilde) > M_ * _deltaZ * _deltaZ || abs(_weno._u2Tilde) > M_ * _deltaZ * _deltaZ)
+								// mark troubled cell
+								_weno._troubled_cells[comp + cell * _nComp] = 1.0;
+						}
+					}
+				}
+				// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
+
+			}
+			else if (_OSmode == 2) // subcell limiting (element-wise blending)
+			{
+				for (unsigned int cell = 0; cell < _nCells; cell++)
+				{
+					_modalCoeff = _modalVanInv * _C.segment(cell * _nNodes, _nNodes).template cast<double>(); // todo use StateType ?
+
+					double modalEnergySquareSum = _modalCoeff.cwiseAbs2().sum();
+					double hm = (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg], 2.0) / modalEnergySquareSum;
+
+					modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
+					hm = hm; //  std::max(hm, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
+
+					const double _s = 9.2102; // todo store this constant
+					const double _T = 0.5 * std::pow(10.0, -1.8 * std::pow(static_cast<double>(_nNodes), 0.25)); // 10−1.8(N + 1)0.2; // todo store this constant
+
+					_weno._troubled_cells[comp + cell * _nComp] = 1.0;// hm;// 1.0 / (1.0 + exp(-_s / _T * (hm - _T)));
+					// todo? limit maximum of blending coefficient?
+				}
+			}
+			// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
+
+		}
 
 		// Add time derivative to bulk residual
 		if (yDot)
@@ -463,47 +503,56 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		const ParamType u = static_cast<ParamType>(_curVelocity);
 		const ParamType d_ax = static_cast<ParamType>(getSectionDependentSlice(_colDispersion, _nComp, secIdx)[comp]);
 
-		// ===================================//
-		// reset cache                        //
-		// ===================================//
+		double FVblending = 0.0;
+		if (_OSmode == 2) {
+			FVblending = 1.0;
+			_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
+			subcellFVintegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, _strideNode, _strideNode);
+		}
+		else
+		{
+			// ===================================//
+			// reset cache                        //
+			// ===================================//
 
-		_h.setZero();
-		_g.setZero();
-		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
+			_h.setZero();
+			_g.setZero();
+			_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
 
-		// ======================================//
-		// solve auxiliary system g = d c / d x  //
-		// ======================================//
+			// ======================================//
+			// solve auxiliary system g = d c / d x  //
+			// ======================================//
 
-		 // DG volume integral in strong form
-		volumeIntegral<StateType, StateType>(_C, _g);
+			 // DG volume integral in strong form
+			volumeIntegral<StateType, StateType>(_C, _g);
 
-		// calculate numerical flux values c*
-		InterfaceFluxAuxiliary<StateType>(y + offsetC() + comp, _strideNode, _strideCell);
+			// calculate numerical flux values c*
+			InterfaceFluxAuxiliary<StateType>(y + offsetC() + comp, _strideNode, _strideCell);
 
-		// DG surface integral in strong form
-		surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]),
-			_strideNode, _strideCell, 1u, _nNodes);
+			// DG surface integral in strong form
+			surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]),
+				_strideNode, _strideCell, 1u, _nNodes);
 
-		// ======================================//
-		// solve main equation RHS  d h / d x    //
-		// ======================================//
+			// ======================================//
+			// solve main equation RHS  d h / d x    //
+			// ======================================//
 
-		// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
-		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
+			// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
+			_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 
-		// DG volume integral in strong form
-		volumeIntegral<ResidualType, ResidualType>(_h, _resC);
+			// DG volume integral in strong form
+			volumeIntegral<ResidualType, ResidualType>(_h, _resC);
 
-		// update boundary values for auxiliary variable g (solid wall)
-		calcBoundaryValues<StateType>();
+			// update boundary values for auxiliary variable g (solid wall)
+			calcBoundaryValues<StateType>();
 
-		// calculate numerical flux values h*
-		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
+			// calculate numerical flux values h*
+			InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
 
-		// DG surface integral in strong form
-		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
-			1u, _nNodes, _strideNode, _strideCell);
+			// DG surface integral in strong form
+			surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
+				1u, _nNodes, _strideNode, _strideCell);
+		}
 	}
 
 	return 0;
