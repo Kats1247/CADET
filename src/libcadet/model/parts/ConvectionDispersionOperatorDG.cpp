@@ -141,6 +141,14 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 			 _OSmode = 2;
 			 int order = paramProvider.exists("FV_ORDER") ? paramProvider.getInt("FV_ORDER") : 1;
+			 if (order <= 0)
+				 throw InvalidParameterException("Low order blending scheme must be of order >= 1, but was specified as " + std::to_string(order));
+			 else if(order > 1)
+				 throw InvalidParameterException("Low order blending scheme of order > 1, not implemented yet. Please use order 1.");
+
+			 _maxBlending = paramProvider.exists("MAX_BLENDING") ? paramProvider.getDouble("MAX_BLENDING") : 1.0;
+			 if(_maxBlending < 0.0)
+				 throw InvalidParameterException("Low order blending factor must be >= 0.0, but was specified as " + std::to_string(_maxBlending));
 
 			 _modalVanInv.resize(_nNodes, _nNodes);
 			 _modalVanInv.setZero();
@@ -503,56 +511,63 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		const ParamType u = static_cast<ParamType>(_curVelocity);
 		const ParamType d_ax = static_cast<ParamType>(getSectionDependentSlice(_colDispersion, _nComp, secIdx)[comp]);
 
-		double FVblending = 0.0;
+		double FVblending = _maxBlending; // todo use indicator
 		if (_OSmode == 2) {
-			FVblending = 1.0;
 			_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
-			subcellFVintegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, _strideNode, _strideNode);
+			if (FVblending > 0.0 && FVblending < 1.0) // only use lower order scheme for advection, treat dispersion with high order DG.
+				subcellFVconvectionIntegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, _strideNode, _strideNode);
+			else if (FVblending == 1.0) { // use lower order scheme for both, advection and dispersion. // TODO: either special mode where this is done or deprecated when troubled cell identification works
+				subcellFVintegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, d_ax, _strideNode, _strideNode);
+				continue;
+			}
 		}
-		else
-		{
-			// ===================================//
-			// reset cache                        //
-			// ===================================//
 
-			_h.setZero();
-			_g.setZero();
-			_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
+		double DGblending = 1.0 - FVblending;
 
-			// ======================================//
-			// solve auxiliary system g = d c / d x  //
-			// ======================================//
+		// ===================================//
+		// reset cache                        //
+		// ===================================//
 
-			 // DG volume integral in strong form
-			volumeIntegral<StateType, StateType>(_C, _g);
+		_h.setZero();
+		_g.setZero();
+		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
 
-			// calculate numerical flux values c*
-			InterfaceFluxAuxiliary<StateType>(y + offsetC() + comp, _strideNode, _strideCell);
+		// ======================================//
+		// solve auxiliary system g = d c / d x  //
+		// ======================================//
 
-			// DG surface integral in strong form
-			surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]),
-				_strideNode, _strideCell, 1u, _nNodes);
+		 // DG volume integral in strong form
+		volumeIntegral<StateType, StateType>(_C, _g);
 
-			// ======================================//
-			// solve main equation RHS  d h / d x    //
-			// ======================================//
+		// calculate numerical flux values c*
+		InterfaceFluxAuxiliary<StateType>(y + offsetC() + comp, _strideNode, _strideCell);
 
-			// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
-			_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
+		// DG surface integral in strong form
+		surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]),
+			_strideNode, _strideCell, 1u, _nNodes);
 
-			// DG volume integral in strong form
-			volumeIntegral<ResidualType, ResidualType>(_h, _resC);
+		// ======================================//
+		// solve main equation RHS  d h / d x    //
+		// ======================================//
 
-			// update boundary values for auxiliary variable g (solid wall)
-			calcBoundaryValues<StateType>();
+		// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
+		_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * DGblending + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 
-			// calculate numerical flux values h*
-			InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
+		// DG volume integral in strong form
+		volumeIntegral<ResidualType, ResidualType>(_h, _resC);
 
-			// DG surface integral in strong form
-			surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
-				1u, _nNodes, _strideNode, _strideCell);
-		}
+		// update boundary values for auxiliary variable g (solid wall)
+		calcBoundaryValues<StateType>();
+
+		// calculate numerical flux values h*
+		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
+
+		// Not needed, when re-accounted for in FV subcell residual (i.e. partly reverted FV subcell DG weak form formulation)
+		//_h += 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * FVblending).template cast<ResidualType>();
+
+		// DG surface integral in strong form
+		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
+			1u, _nNodes, _strideNode, _strideCell);
 	}
 
 	return 0;
@@ -598,9 +613,9 @@ unsigned int AxialConvectionDispersionOperatorBaseDG::nConvDispEntries(bool pure
 void model::parts::AxialConvectionDispersionOperatorBaseDG::convDispJacPattern(std::vector<T>& tripletList, const int bulkOffset)
 {
 	if (_exactInt)
-		ConvDispModalPattern(tripletList, bulkOffset);
+		ConvDispExIntDGPattern(tripletList, bulkOffset);
 	else
-		ConvDispNodalPattern(tripletList, bulkOffset);
+		ConvDispCollocationDGPattern(tripletList, bulkOffset);
 }
 /**
  * @brief Multiplies the time derivative Jacobian @f$ \frac{\partial F}{\partial \dot{y}}\left(t, y, \dot{y}\right) @f$ with a given vector

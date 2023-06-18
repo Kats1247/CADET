@@ -189,6 +189,7 @@ namespace cadet
 				Eigen::VectorXd _modalCoeff; //!< Orthonormal modal polynomial coefficients (used by smoothness indicator)
 				Eigen::MatrixXd _modalVanInv; //!< Inverse Vandermonde matrix of orthonormal modal polynomial coefficients (used by smoothness indicator)
 				Eigen::VectorXd _weights; //!< LGL quadrature weights
+				double _maxBlending;
 
 				Eigen::Vector<active, Eigen::Dynamic> _g; //!< auxiliary variable
 				Eigen::Vector<active, Eigen::Dynamic> _h; //!< auxiliary substitute
@@ -769,7 +770,7 @@ namespace cadet
 				}
 
 				template<typename StateType, typename ResidualType, typename ParamType>
-				void subcellFVintegral(double blending, const StateType* _C, ResidualType* stateDer,
+				void subcellFVintegral(double blending, const StateType* _C, ResidualType* stateDer, ParamType d_ax,
 					unsigned int strideNodeC, unsigned int strideNode_stateDer) {
 
 					const StateType* localC = _C;
@@ -789,7 +790,8 @@ namespace cadet
 						// subcell faces
 						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
 
-							flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]); // left value (upwind)
+							flux = blending * (static_cast<ResidualType>(_curVelocity * localC[0]) // upwind flux for convection
+								+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[interface - 1] + _invWeights[interface]))); // central flux for diffusion with first order FD approximation of c_x
 
 							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
 							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
@@ -807,14 +809,61 @@ namespace cadet
 
 					for (unsigned int elemFace = 1; elemFace < _nCells; elemFace++, localC += _nNodes * strideNodeC, localStateDer += _nNodes * strideNode_stateDer) {
 
-						flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]);
+						flux = blending * (static_cast<ResidualType>(_curVelocity * localC[0]) // upwind flux for convection
+							+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+
 						localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
 						localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
 					}
 					// outlet boundary BC // todo backwards flow! (will be solved once DG operation is being used)
-					flux = blending * static_cast<ResidualType>(_curVelocity * _C[_nCells * (strideNodeC * _nNodes) - strideNodeC]);
+					flux = blending * (static_cast<ResidualType>(_curVelocity * _C[_nCells * (strideNodeC * _nNodes) - strideNodeC]) // upwind flux for convection
+						+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+
 					stateDer[_nCells * (strideNode_stateDer * _nNodes) - strideNode_stateDer] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
 
+				}
+				template<typename StateType, typename ResidualType, typename ParamType>
+				void subcellFVconvectionIntegral(double blending, const StateType* _C, ResidualType* stateDer,
+					unsigned int strideNodeC, unsigned int strideNode_stateDer) {
+
+					const StateType* localC = _C;
+					ResidualType* localStateDer = stateDer;
+					ResidualType flux = 0.0;
+
+					// TODO backwards flow!
+
+					/* subcell FV faces */
+
+					for (unsigned int cell = 0; cell < _nCells; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+
+						//FVintegral<StateType, ResidualType, ParamType>(blending, cell, &_C[cell * (strideNodeC * _nNodes)], &stateDer[cell * (strideNode_stateDer * _nNodes)], strideNodeC, strideNode_stateDer);
+
+						//if (!indicator) { // todo use indicator
+						//	localC +=
+						//		localStateDer +=
+						//		continue;
+						//}
+
+						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+
+							flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]); // upwind flux for convection
+
+							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
+							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
+						}
+					}
+
+					/* DG element interfaces : account DG strong - form like formulation of FV subcell scheme */
+					// Not needed, when re-accounted for in DG surface integral (i.e. partly reverted FV subcell DG weak form formulation)
+					//localC = _C;
+					//localStateDer = stateDer;
+
+					//for (unsigned int DGcell = 0; DGcell < _nCells; DGcell++, localC += _nNodes * strideNodeC, localStateDer += _nNodes * strideNode_stateDer) {
+					//	// todo use indicator
+
+					//	localStateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * blending * static_cast<ResidualType>(_curVelocity) * localC[0];
+					//	localStateDer[_polyDeg * strideNode_stateDer] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * blending * static_cast<ResidualType>(_curVelocity) * localC[_polyDeg * strideNodeC];
+					//}
 				}
 				/**
 				 * @brief computes ghost nodes to implement boundary conditions
@@ -835,7 +884,7 @@ namespace cadet
 				/**
 				 * @brief sets the sparsity pattern of the convection dispersion Jacobian for the nodal DG scheme
 				 */
-				int ConvDispNodalPattern(std::vector<T>& tripletList, const int offC = 0) {
+				int ConvDispCollocationDGPattern(std::vector<T>& tripletList, const int offC = 0) {
 
 					/*======================================================*/
 					/*			Define Convection Jacobian Block			*/
@@ -963,7 +1012,7 @@ namespace cadet
 				/**
 				* @brief sets the sparsity pattern of the convection dispersion Jacobian for the exact integration (her: modal) DG scheme
 				*/
-				int ConvDispModalPattern(std::vector<T>& tripletList, const int offC = 0) {
+				int ConvDispExIntDGPattern(std::vector<T>& tripletList, const int offC = 0) {
 
 					/*======================================================*/
 					/*			Define Convection Jacobian Block			*/
