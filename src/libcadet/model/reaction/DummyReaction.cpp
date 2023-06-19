@@ -12,6 +12,7 @@
 
 #include "model/ReactionModel.hpp"
 #include "ParamIdUtil.hpp"
+#include "CompileTimeConfig.hpp"
 
 namespace cadet
 {

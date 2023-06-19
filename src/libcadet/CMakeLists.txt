@@ -167,6 +167,9 @@ set (LIBCADET_NONLINALG_SOURCES
 	${CMAKE_SOURCE_DIR}/src/libcadet/nonlin/CompositeSolver.cpp
 	${CMAKE_SOURCE_DIR}/src/libcadet/nonlin/Solver.cpp
 )
+if (ENABLE_DG)
+	list(APPEND LIBCADET_NONLINALG_SOURCES ${CMAKE_SOURCE_DIR}/src/libcadet/linalg/BandedEigenSparseRowIterator.hpp)
+endif()
 
 if (ENABLE_GRM_2D)
 	set(LIBCADET_NONLINALG_SPARSE_SOURCES)
