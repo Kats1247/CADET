@@ -742,7 +742,7 @@ protected:
 	unsigned int _jacobianAdDirs; //!< Number of AD seed vectors required for Jacobian computation
 
 	std::vector<active> _parCellSize; //!< Particle shell size
-	std::vector<active> _parCenterRadius; //!< Particle node-centered position for each particle node
+	std::vector<active> _parCenterRadius; //!< Particle node-centered position for each particle node. Caution: oppositely ordered compared to DG state
 	std::vector<active> _parOuterSurfAreaPerVolume; //!< Particle shell outer sphere surface to volume ratio
 	std::vector<active> _parInnerSurfAreaPerVolume; //!< Particle shell inner sphere surface to volume ratio
 
@@ -887,15 +887,16 @@ protected:
 		*/
 		virtual int writeParticleCoordinates(unsigned int parType, double* coords) const
 		{
-			active const* const pcr = _model._parCenterRadius.data() + _disc.offsetMetric[parType];
-
 			// Note that the DG particle shells are oppositely ordered compared to the FV particle shells
+			double r_L = static_cast<double>(_model._parCoreRadius[parType]);
 			for (unsigned int par = 0; par < _disc.nParPoints[parType]; par++) {
 
 				unsigned int cell = std::floor(par / _disc.nParNode[parType]);
+				unsigned int node = par % _disc.nParNode[parType];
+				coords[par] = r_L + 0.5 * static_cast<double>(_disc.deltaR[_disc.offsetMetric[parType] + cell]) * (1.0 + _disc.parNodes[parType][node]);
+				if (node == _disc.nParNode[parType] - 1)
+					r_L += static_cast<double>(_disc.deltaR[_disc.offsetMetric[parType] + cell]);
 
-				double r_L = static_cast<double>(pcr[cell]) - 0.5 * static_cast<double>(_disc.deltaR[_disc.offsetMetric[parType] + cell]);
-				coords[par] = r_L + 0.5 * static_cast<double>(_disc.deltaR[_disc.offsetMetric[parType] + cell]) * (1.0 + _disc.parNodes[parType][par % _disc.nParNode[parType]]);
 			}
 
 			return _disc.nParPoints[parType];
