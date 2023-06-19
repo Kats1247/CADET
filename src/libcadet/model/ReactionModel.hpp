@@ -20,6 +20,7 @@
 
 #include <unordered_map>
 
+#include "CompileTimeConfig.hpp"
 #include "cadet/ParameterProvider.hpp"
 #include "cadet/ParameterId.hpp"
 #include "linalg/DenseMatrix.hpp"
