@@ -120,7 +120,16 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 		paramProvider.pushScope("oscillation_suppression");
 
-		 std::string osMethod = paramProvider.getString("METHOD");
+		std::string smoothness_indicator = paramProvider.exists("SMOOTHNESS_INDICATOR") ? paramProvider.getString("SMOOTHNESS_INDICATOR") : "MODAL_ENERGY_LEGENDRE";
+
+		if (smoothness_indicator == "MODAL_ENERGY_LEGENDRE")
+			_smoothnessIndicator = std::make_unique<PolynomialEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse());
+		//else if (smoothness_indicator == "MODAL_ENERGY_PRIMITIVE")
+			//_smoothnessIndicator = std::make_unique<PolynomialEnergyIndicator>(_polyDeg, getVandermonde_PRIMITIVE().inverse());
+		else
+			throw InvalidParameterException("Unknown smoothness indicator " + smoothness_indicator);
+
+		std::string osMethod = paramProvider.getString("METHOD");
 
 		 if (osMethod == "WENO")
 		 {
@@ -133,7 +142,7 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 			 bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
 			 std::string limiter = paramProvider.exists("WENO_LIMITER") ? paramProvider.getString("WENO_LIMITER") : "MINMOD";
 
-			 _weno.init(limiter, eps, r, gamma, _nCells, _nComp, write_smoothness_indicator);
+			 _weno.init(limiter, eps, r, gamma, &_invWeights[0], _polyDerM, _nCells, _nNodes, _nComp);
 		 }
 		 else if (osMethod == "SUBCELL_FV_LIMITING" || osMethod == "SUBCELL_FV")
 		 {
@@ -159,10 +168,14 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 			 const int _FVboundaryTreatment = paramProvider.exists("SUBCELL_FV_BOUNDARY_TREATMENT") ? paramProvider.getInt("SUBCELL_FV_BOUNDARY_TREATMENT") : 0; // todo choose default
 
 			 const bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
+			 if (write_smoothness_indicator)
+				 _troubledCells = new double[nCells * nComp];
+			 else
+				 _troubledCells = nullptr;
 
 			 MatrixXd modalVanInv = getVandermonde_LEGENDRE().inverse();
 
-			 _subcellLimiter.init(maxBlending, limiter, _FVorder, _FVboundaryTreatment, _nNodes, &_nodes[0], &_invWeights[0], modalVanInv, _nCells, _nComp, write_smoothness_indicator);
+			 _subcellLimiter.init(maxBlending, limiter, _FVorder, _FVboundaryTreatment, _nNodes, &_nodes[0], &_invWeights[0], modalVanInv, _nCells, _nComp);
 		 }
 		 else if (osMethod != "NONE")
 			throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
@@ -187,6 +200,8 @@ bool AxialConvectionDispersionOperatorBaseDG::configure(UnitOpIdx unitOpIdx, IPa
 	// Read geometry parameters
 	_colLength = paramProvider.getDouble("COL_LENGTH");
 	_deltaZ = _colLength / _nCells;
+	if (_OSmode == 1)
+		_weno.setDeltaZ(_deltaZ);
 
 	/* compute dispersion jacobian blocks(without parameters except element spacing, i.e. static entries) */
 	// we only need unique dispersion blocks, which are given by cells 1, 2, nCol for inexact integration DG and by cells 1, 2, 3, nCol-1, nCol for eaxct integration DG
@@ -443,6 +458,9 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// calculate smoothness indicator, if oscillation suppression is active
 		if (_OSmode != 0)
 		{
+			for (unsigned int cell = 0; cell < _nCells; cell++)
+				*troubledCells(comp + cell * _nComp) = _smoothnessIndicator->calcSmoothness(y + offsetC() + comp, _strideNode, _nComp);
+
 			if (_OSmode == 1) // WENO
 			{
 				// todo move this to weno operator
@@ -481,13 +499,6 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 				// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
 
 			}
-			else if (_OSmode == 2) // Subcell FV limiting (element-wise blending)
-			{
-				for (unsigned int cell = 0; cell < _nCells; cell++)
-					_subcellLimiter.calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, comp, cell);
-			}
-			// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
-
 		}
 
 		// Add time derivative to bulk residual

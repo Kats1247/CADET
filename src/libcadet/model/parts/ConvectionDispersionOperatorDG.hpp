@@ -21,6 +21,7 @@
 #include "ParamIdUtil.hpp"
 #include "AutoDiff.hpp"
 #include "Memory.hpp"
+#include "SmoothnessIndicator.hpp"
 #include "WenoDG.hpp"
 #include "DGSubcellLimiterFV.hpp"
 #include "SimulationTypes.hpp"
@@ -128,10 +129,8 @@ namespace cadet
 				inline bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return static_cast<bool>(_OSmode); } // only zero if no oscillation suppression
 				inline double* smoothnessIndicator() const CADET_NOEXCEPT
 				{
-					if (_OSmode == 1)
-						return _weno.troubledCells();
-					else if (_OSmode == 2)
-						return  _subcellLimiter.troubledCells();
+					if (hasSmoothnessIndicator())
+						return _troubledCells;
 					else
 						return nullptr;
 				}
@@ -159,6 +158,9 @@ namespace cadet
 				bool setParameter(const ParameterId& pId, double value);
 				bool setSensitiveParameter(std::unordered_set<active*>& sensParams, const ParameterId& pId, unsigned int adDirection, double adValue);
 				bool setSensitiveParameterValue(const std::unordered_set<active*>& sensParams, const ParameterId& id, double value);
+
+				inline double* troubledCells(int cellIdx) const CADET_NOEXCEPT { return &_troubledCells[cellIdx]; }
+				inline double* troubledCells() const CADET_NOEXCEPT { return troubledCells(0); }
 
 			protected:
 
@@ -195,6 +197,8 @@ namespace cadet
 				int _OSmode; //!< oscillation suppression mode; 0 : none, 1 : WENO, 2 : Subcell limiting
 				WenoDG _weno; //!< WENO operator
 				DGSubcellLimiterFV _subcellLimiter;
+				std::unique_ptr<SmoothnessIndicator> _smoothnessIndicator;
+				double* _troubledCells; //!< Troubled/oscillatory DG cell indicator
 
 				// Simulation parameters
 				active _colLength; //!< Column length \f$ L \f$
