@@ -42,7 +42,7 @@ namespace parts
  * @brief Creates an AxialConvectionDispersionOperatorBaseDG
  */
 AxialConvectionDispersionOperatorBaseDG::AxialConvectionDispersionOperatorBaseDG() :
-	_dispersionDep(nullptr)
+	_dispersionDep(nullptr), _DGjacAxDispBlocks(nullptr)
 {
 }
 
@@ -135,32 +135,34 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 			 _weno.init(limiter, eps, r, gamma, _nCells, _nComp, write_smoothness_indicator);
 		 }
-		 else if (osMethod == "SUBCELL_LIMITING")
+		 else if (osMethod == "SUBCELL_FV_LIMITING" || osMethod == "SUBCELL_FV")
 		 {
-			 LOG(Debug) << "Subcell limiting used as oscillation suppression mechanism.";
+			 if (osMethod == "SUBCELL_FV_LIMITING") {
+				 LOG(Debug) << "Subcell FV limiting used as oscillation suppression mechanism for advection.";
+				 _OSmode = 2;
+			 }
+			 else if (osMethod == "SUBCELL_FV") {
+				 LOG(Debug) << "Subcell FV for advection and dispersion used on DG grid.";
+				 _OSmode = 4;
+			 }
 
-			 _OSmode = 2;
-			 int order = paramProvider.exists("FV_ORDER") ? paramProvider.getInt("FV_ORDER") : 1;
-			 if (order <= 0)
-				 throw InvalidParameterException("Low order blending scheme must be of order >= 1, but was specified as " + std::to_string(order));
-			 else if(order > 1)
-				 throw InvalidParameterException("Low order blending scheme of order > 1, not implemented yet. Please use order 1.");
+			 const int _FVorder = paramProvider.exists("SUBCELL_FV_ORDER") ? paramProvider.getInt("SUBCELL_FV_ORDER") : 1; // todo choose default
+			 if (_FVorder <= 0)
+				 throw InvalidParameterException("Subcell FV order must be > 0, but was specified as " + std::to_string(_FVorder));
 
-			 _maxBlending = paramProvider.exists("MAX_BLENDING") ? paramProvider.getDouble("MAX_BLENDING") : 1.0;
-			 if(_maxBlending < 0.0)
-				 throw InvalidParameterException("Low order blending factor must be >= 0.0, but was specified as " + std::to_string(_maxBlending));
+			 double maxBlending = paramProvider.exists("SUBCELL_FV_MAX_BLENDING") ? paramProvider.getDouble("SUBCELL_FV_MAX_BLENDING") : 1.0; // todo choose default
+			 if(maxBlending < 0.0 || maxBlending > 1.0)
+				 throw InvalidParameterException("Low order blending factor must be >= 0.0 and <= 1.0, but was specified as " + std::to_string(maxBlending));
 
-			 _modalVanInv.resize(_nNodes, _nNodes);
-			 _modalVanInv.setZero();
-			 _modalVanInv = getVandermonde_LEGENDRE().inverse();
-			 _modalCoeff.resize(_nNodes);
-			 _modalCoeff.setZero();
-			 _weights.resize(_nNodes);
-			 _weights = _invWeights.cwiseInverse();
+			 const std::string limiter = paramProvider.exists("SUBCELL_FV_LIMITER") ? paramProvider.getString("SUBCELL_FV_LIMITER") : "MINMOD"; // todo choose default
 
-			 //// todo: use subcell limiter class
-			 std::string limiter = "MINMOD";
-			 _weno.init(limiter, 1e-6, 2.0, 0.998, _nCells, _nComp, true);
+			 const int _FVboundaryTreatment = paramProvider.exists("SUBCELL_FV_BOUNDARY_TREATMENT") ? paramProvider.getInt("SUBCELL_FV_BOUNDARY_TREATMENT") : 0; // todo choose default
+
+			 const bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
+
+			 MatrixXd modalVanInv = getVandermonde_LEGENDRE().inverse();
+
+			 _subcellLimiter.init(maxBlending, limiter, _FVorder, _FVboundaryTreatment, _nNodes, &_nodes[0], &_invWeights[0], modalVanInv, _nCells, _nComp, write_smoothness_indicator);
 		 }
 		 else if (osMethod != "NONE")
 			throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
@@ -430,6 +432,8 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 {
 	for (unsigned int comp = 0; comp < _nComp; comp++) {
 
+		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
+
 		// create Eigen objects
 		Eigen::Map<const Vector<StateType, Dynamic>, 0, InnerStride<Dynamic>> _C(y + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<Dynamic>> _resC(res + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
@@ -441,9 +445,10 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		{
 			if (_OSmode == 1) // WENO
 			{
+				// todo move this to weno operator
 				for (unsigned int cell = 0; cell < _nCells; cell++)
 				{
-					_weno._troubled_cells[comp + cell * _nComp] = 0.0;
+					_weno._troubled_cells[comp + cell * _nComp] = 1.0;
 
 					if (cell > 0 && cell < _nCells - 1) // todo boundary treatment
 					{
@@ -476,24 +481,10 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 				// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
 
 			}
-			else if (_OSmode == 2) // subcell limiting (element-wise blending)
+			else if (_OSmode == 2) // Subcell FV limiting (element-wise blending)
 			{
 				for (unsigned int cell = 0; cell < _nCells; cell++)
-				{
-					_modalCoeff = _modalVanInv * _C.segment(cell * _nNodes, _nNodes).template cast<double>(); // todo use StateType ?
-
-					double modalEnergySquareSum = _modalCoeff.cwiseAbs2().sum();
-					double hm = (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg], 2.0) / modalEnergySquareSum;
-
-					modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
-					hm = hm; //  std::max(hm, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
-
-					const double _s = 9.2102; // todo store this constant
-					const double _T = 0.5 * std::pow(10.0, -1.8 * std::pow(static_cast<double>(_nNodes), 0.25)); // 10−1.8(N + 1)0.2; // todo store this constant
-
-					_weno._troubled_cells[comp + cell * _nComp] = 1.0;// hm;// 1.0 / (1.0 + exp(-_s / _T * (hm - _T)));
-					// todo? limit maximum of blending coefficient?
-				}
+					_subcellLimiter.calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, comp, cell);
 			}
 			// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
 
@@ -511,15 +502,17 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		const ParamType u = static_cast<ParamType>(_curVelocity);
 		const ParamType d_ax = static_cast<ParamType>(getSectionDependentSlice(_colDispersion, _nComp, secIdx)[comp]);
 
-		double FVblending = _maxBlending; // todo use indicator
-		if (_OSmode == 2) {
-			_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
-			if (FVblending > 0.0 && FVblending < 1.0) // only use lower order scheme for advection, treat dispersion with high order DG.
+		double FVblending = _subcellLimiter.maxBlending(); // todo use indicator
+
+		if (_OSmode == 2 && FVblending > 0.0) // Element-wise  lower order subcell FV blending for advection, treat dispersion with high order DG.
 				subcellFVconvectionIntegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, _strideNode, _strideNode);
-			else if (FVblending == 1.0) { // use lower order scheme for both, advection and dispersion. // TODO: either special mode where this is done or deprecated when troubled cell identification works
-				subcellFVintegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, d_ax, _strideNode, _strideNode);
-				continue;
-			}
+
+		// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
+
+		else if (_OSmode == 4) // Subcell FV without blending, i.e. pure FV on DG grid for both advection and dispersion
+		{
+			subcellFVconvDispIntegral<StateType, ResidualType, ParamType>(FVblending, y + offsetC() + comp, res + offsetC() + comp, d_ax, _strideNode, _strideNode);
+			continue;
 		}
 
 		double DGblending = 1.0 - FVblending;
@@ -530,7 +523,6 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 
 		_h.setZero();
 		_g.setZero();
-		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
 
 		// ======================================//
 		// solve auxiliary system g = d c / d x  //
