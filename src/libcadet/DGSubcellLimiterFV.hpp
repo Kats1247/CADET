@@ -82,11 +82,15 @@ namespace cadet
 		 */
 		enum class BoundaryTreatment : int
 		{
-			LimiterSlope = 0, //!< Use neighbouring interface value to compute slope using limiter.
-			CentralSlope = 1, //!< Use a central slope with only interior information.
-			Constant = 2 //!< Define boundaries as constant reconstruction.
+			LimiterSlope = 0, //!< Slope limiter reconstruction using neighbour interface value.
+			CentralSlope = 1, //!< Central slope reconstruction with interior information.
+			Constant = 2 //!< Constant reconstruction of boundary subcells.
 		};
 
+		/**
+		 * @brief Creates the subcell Finite Volume scheme
+		 */
+		DGSubcellLimiterFV() : _LGLweights(nullptr), _LGLnodes(nullptr), _subcellGrid(nullptr) { }
 
 		~DGSubcellLimiterFV() CADET_NOEXCEPT
 		{
@@ -95,12 +99,11 @@ namespace cadet
 			delete[] _subcellGrid;
 		}
 
-		void init(double maxBlending, std::string limiter, const int FVorder, const int  boundaryTreatment, const unsigned int nNodes, double* LGLnodes, double* invWeights, Eigen::MatrixXd modalVanInv, const unsigned int nCells, const unsigned int nComp) {
+		void init(std::string limiter, const int FVorder, const int  boundaryTreatment, const unsigned int nNodes, double* LGLnodes, double* invWeights, Eigen::MatrixXd modalVanInv, const unsigned int nCells, const unsigned int nComp) {
 
 			_nNodes = nNodes;
 			_polyDeg = nNodes - 1;
 			_nComp = nComp;
-			_maxBlending = maxBlending;
 
 			_LGLweights = new double[nNodes];
 			for (int node = 0; node < nNodes; node++)
@@ -208,9 +211,6 @@ namespace cadet
 			}
 		}
 
-		inline double maxBlending() const CADET_NOEXCEPT { return _maxBlending; }
-
-
 		private:
 
 			std::unique_ptr<SlopeLimiterFV> _slope_limiter; //!< Slope limiter for second order FV reconstruction
@@ -221,7 +221,6 @@ namespace cadet
 			int _nComp; //!< Number of liquid phase components
 			int _nNodes; //!< Number of DG nodes per element, i.e. FV subcells
 			int _polyDeg; //!< Polynomial degree of DG Ansatz
-			double _maxBlending; //!< Maximal blending coefficient for lower order subcell FV scheme
 			double* _subcellGrid; //!< FV subcell grid, i.e. subcell borders
 	};
 
