@@ -115,7 +115,8 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 	paramProvider.pushScope("discretization");
 	_OSmode = 0;
-	_maxBlending = 0;
+	_maxBlending = 0.0;
+	_blendingThreshold = 0.0;
 	_troubledCells = nullptr;
 
 	// Read oscillation suppression settings and apply them
@@ -128,13 +129,23 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 		std::string smoothness_indicator = paramProvider.exists("SMOOTHNESS_INDICATOR") ? paramProvider.getString("SMOOTHNESS_INDICATOR") : "MODAL_ENERGY_LEGENDRE";
 		if (smoothness_indicator == "MODAL_ENERGY_LEGENDRE")
 		{
-			double modalCoefThreshold = paramProvider.exists("MODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("MODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
+			_blendingThreshold = paramProvider.exists("BLENDING_THRESHOLD") ? paramProvider.getDouble("BLENDING_THRESHOLD") : 0.0; // 0.01; // todo default value
+			if (_blendingThreshold < 0.0 || _blendingThreshold > 1.0)
+				throw InvalidParameterException("Blending threshold must be >= 0.0 and <= 1.0, but was specified as " + std::to_string(_blendingThreshold));
+
 			double nodalCoefThreshold = paramProvider.exists("NODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("NODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
 			double nodalCoefShift = paramProvider.exists("NODAL_COEFFICIENT_SHIFT") ? paramProvider.getDouble("NODAL_COEFFICIENT_SHIFT") : 0.0; // 0.1; // todo default value
-			_smoothnessIndicator = std::make_unique<PolynomialEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse(), modalCoefThreshold, nodalCoefThreshold, nodalCoefShift);
+			_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse(), nodalCoefThreshold, nodalCoefShift);
 		}
 		//else if (smoothness_indicator == "MODAL_ENERGY_PRIMITIVE") // todo? add other modal polynomial bases
-			//_smoothnessIndicator = std::make_unique<PolynomialEnergyIndicator>(_polyDeg, getVandermonde_PRIMITIVE().inverse());
+		//{
+		//	double modalCoefThreshold = paramProvider.exists("MODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("MODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
+		//	double nodalCoefThreshold = paramProvider.exists("NODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("NODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
+		//	double nodalCoefShift = paramProvider.exists("NODAL_COEFFICIENT_SHIFT") ? paramProvider.getDouble("NODAL_COEFFICIENT_SHIFT") : 0.0; // 0.1; // todo default value
+		//	_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_PRIMITIVE().inverse(), nodalCoefThreshold, nodalCoefShift);
+		//}
+		else if (smoothness_indicator == "ALL_ELEMENTS")
+			_smoothnessIndicator = std::make_unique<AllElementsIndicator>();
 		else
 			throw InvalidParameterException("Unknown smoothness indicator " + smoothness_indicator);
 
@@ -456,56 +467,25 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 
 		_boundary[0] = y[comp]; // copy inlet DOFs to ghost node
 
-		// create Eigen objects
+		// Create Eigen objects
 		Eigen::Map<const Vector<StateType, Dynamic>, 0, InnerStride<Dynamic>> _C(y + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<Dynamic>> _resC(res + offsetC() + comp, _nPoints, InnerStride<Dynamic>(_strideNode));
 		Eigen::Map<Vector<ResidualType, Dynamic>, 0, InnerStride<>> _h(reinterpret_cast<ResidualType*>(&_h[0]), _nPoints, InnerStride<>(1));
 		Eigen::Map<Vector<StateType, Dynamic>, 0, InnerStride<>> _g(reinterpret_cast<StateType*>(&_g[0]), _nPoints, InnerStride<>(1));
 
-		// calculate smoothness indicator, if oscillation suppression is active
+		// Calculate smoothness indicator if oscillation suppression is active
 		if (_OSmode != 0)
 		{
 			for (unsigned int cell = 0; cell < _nCells; cell++)
-				*troubledCells(comp + cell * _nComp) = std::min(_maxBlending, _smoothnessIndicator->calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, _nComp, cell));
-
-			if (_OSmode == 1) // WENO
 			{
-				// todo move this to weno operator
-				for (unsigned int cell = 0; cell < _nCells; cell++)
-				{
-					_troubledCells[comp + cell * _nComp] = 1.0;
-
-					if (cell > 0 && cell < _nCells - 1) // todo boundary treatment
-					{
-						// todo store mass matrix and LGL weights additionally to respective inverse
-						// todo overwrite values instead of recalculation
-						_weno._pAvg0 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment((cell - 1) * _nNodes, _nNodes).array()).sum();
-						_weno._pAvg1 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment(cell * _nNodes, _nNodes).array()).sum();
-						_weno._pAvg2 = 1.0 / static_cast<ParamType>(_deltaZ) * (_invWeights.cwiseInverse().template cast<StateType>().array() * _C.segment((cell + 1) * _nNodes, _nNodes).array()).sum();
-
-						_weno._uTilde = _C[cell * _nNodes + _nNodes - 1] - _weno._pAvg1; // average minus inner interface value on right face
-						_weno._u2Tilde = _weno._pAvg1 - _C[cell * _nNodes]; // average minus inner interface value on left face
-
-						double trigger1 = _weno.weno_limiter->call(_weno._uTilde, _weno._pAvg2 - _weno._pAvg1, _weno._pAvg1 - _weno._pAvg0);
-						double trigger2 = _weno.weno_limiter->call(_weno._u2Tilde, _weno._pAvg2 - _weno._pAvg1, _weno._pAvg1 - _weno._pAvg0);
-
-						double M2 = (_polyDerM * _polyDerM * _C.segment(cell * _nNodes, _nNodes).template cast<double>()).maxCoeff();
-						//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
-						double M_ = 2.0 / 3.0 * M2;
-						//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
-
-						// reconstruct if cell is troubled, i.e. potential oscillations
-						if (abs(trigger1 - _weno._uTilde) > 1e-8 || abs(trigger2 - _weno._u2Tilde) > 1e-8)
-						{
-							if (abs(_weno._uTilde) > M_ * _deltaZ * _deltaZ || abs(_weno._u2Tilde) > M_ * _deltaZ * _deltaZ)
-								// mark troubled cell
-								_troubledCells[comp + cell * _nComp] = 1.0;
-						}
-					}
-				}
-				// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
-
+				_troubledCells[comp + cell * _nComp] = std::min(_maxBlending, _smoothnessIndicator->calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, _nComp, cell));
+				if (_troubledCells[comp + cell * _nComp] < _blendingThreshold)
+					_troubledCells[comp + cell * _nComp] = 0.0;
 			}
+			//if (_OSmode == 1) // WENO
+			//{
+			//	// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
+			//}
 		}
 
 		// Add time derivative to bulk residual
@@ -534,35 +514,34 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		}
 
 		// ===================================//
-		// reset cache                        //
+		// Reset cache                        //
 		// ===================================//
 
 		_h.setZero();
 		_g.setZero();
 
-		// ======================================//
-		// solve auxiliary system g = d c / d x  //
-		// ======================================//
+		// ========================================//
+		// Compute auxiliary system g = d c / d x  //
+		// ========================================//
 
 		 // DG volume integral in strong form
 		volumeIntegral<StateType, StateType>(_C, _g);
 
-		// calculate numerical flux values c*
+		// Calculate numerical flux values c*
 		InterfaceFluxAuxiliary<StateType>(y + offsetC() + comp, _strideNode, _strideCell);
 
 		// DG surface integral in strong form
-		surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]),
-			_strideNode, _strideCell, 1u, _nNodes);
+		surfaceIntegral<StateType, StateType>(y + offsetC() + comp, reinterpret_cast<StateType*>(&_g[0]), _strideNode, _strideCell, 1u, _nNodes);
 
-		// ======================================//
-		// solve main equation RHS  d h / d x    //
-		// ======================================//
+		// ========================================//
+		// Compute main equation RHS  d h / d x    //
+		// ========================================//
 
-		// calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
+		// Calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
 		if (DGblending < 1.0)
 		{
 			for (int cell = 0; cell < _nCells; cell++)
-				_h.segment(cell * _nNodes, _nNodes) = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C.segment(cell * _nNodes, _nNodes) * (1.0 - _troubledCells[cell])).template cast<ResidualType>();
+				_h.segment(cell * _nNodes, _nNodes) = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C.segment(cell * _nNodes, _nNodes) * (1.0 - _troubledCells[comp + cell * _nComp])).template cast<ResidualType>();
 			_h += (2.0 / static_cast<ParamType>(_deltaZ) * d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 		}
 		else
@@ -571,18 +550,17 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// DG volume integral in strong form
 		volumeIntegral<ResidualType, ResidualType>(_h, _resC);
 
-		// update boundary values for auxiliary variable g (solid wall)
+		// Update boundary values for auxiliary variable g (solid wall)
 		calcBoundaryValues<StateType>();
 
-		// calculate numerical flux values h*
+		// Calculate numerical flux values h*
 		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
 
 		// Not needed, when re-accounted for in FV subcell residual (i.e. partly reverted FV subcell DG weak form formulation)
 		//_h += 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * FVblending).template cast<ResidualType>();
 
 		// DG surface integral in strong form
-		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp,
-			1u, _nNodes, _strideNode, _strideCell);
+		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp, 1u, _nNodes, _strideNode, _strideCell);
 	}
 
 	return 0;
