@@ -159,9 +159,6 @@ namespace cadet
 				bool setSensitiveParameter(std::unordered_set<active*>& sensParams, const ParameterId& pId, unsigned int adDirection, double adValue);
 				bool setSensitiveParameterValue(const std::unordered_set<active*>& sensParams, const ParameterId& id, double value);
 
-				inline double* troubledCells(int cellIdx) const CADET_NOEXCEPT { return &_troubledCells[cellIdx]; }
-				inline double* troubledCells() const CADET_NOEXCEPT { return troubledCells(0); }
-
 			protected:
 
 				template <typename StateType, typename ResidualType, typename ParamType, typename RowIteratorType, bool wantJac>
@@ -770,118 +767,75 @@ namespace cadet
 					}
 				}
 
-				// TODO: reconstruction and backward flow
 				template<typename StateType, typename ResidualType, typename ParamType>
-				void subcellFVconvDispIntegral(const StateType* _C, ResidualType* stateDer, ParamType d_ax,
-					unsigned int strideNodeC, unsigned int strideNode_stateDer) {
+				void subcellFVconvDispIntegral(double blending, const StateType* _C, ResidualType* stateDer, ParamType d_ax)
+				{
 
 					const StateType* localC = _C;
+					StateType leftState = 0.0;
+					StateType rightState = 0.0;
 					ResidualType* localStateDer = stateDer;
 					ResidualType flux = 0.0;
 
-					// todo use troubled cell indicator
-					double blending = _maxBlending;
+					// Subcell inner faces
+					for (unsigned int cell = 0; cell < _nCells; cell++, localC += _strideNode, localStateDer += _strideNode) {
 
-					for (unsigned int cell = 0; cell < _nCells; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+						for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) {
 
-						//FVintegral<StateType, ResidualType, ParamType>(blending, cell, &_C[cell * (strideNodeC * _nNodes)], &stateDer[cell * (strideNode_stateDer * _nNodes)], strideNodeC, strideNode_stateDer);
-						
-						//if (!indicator) { // todo use indicator
-						//	localC +=
-						//		localStateDer +=
-						//		continue;
-						//}
+							leftState = _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], interface - 1, true);
+							rightState = _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[_strideNode], interface, false);
 
-						// subcell faces
-						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
-
-							flux = blending * (static_cast<ResidualType>(_curVelocity * localC[0]) // upwind flux for convection
-								+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[interface - 1] + _invWeights[interface]))); // central flux for diffusion with first order FD approximation of c_x
+							flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
+								+ 0.5 * d_ax * (leftState + rightState) * (2 / (_invWeights[interface - 1] + _invWeights[interface]))); // central flux for diffusion with first order FD approximation of c_x
 
 							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
-							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
+							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
 						}
 					}
 
-					// DG element faces TODO: handle this by DG operation by bringing FV into a DG type form
-					// inlet boundary BC // todo backwards flow! (will be solved once DG operation is being used)
+					// DG element faces
+					// inlet boundary BC
 					flux = blending * static_cast<ResidualType>(_curVelocity * _boundary[0]);
-					stateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+					if(_dir == 1)
+						stateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+					else
+						stateDer[(_nPoints - 1) * _strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
 
 					// inner DG element faces
-					localC = _C + strideNodeC * (_nNodes - 1);
-					localStateDer = stateDer + strideNode_stateDer * (_nNodes - 1);
+					localC = _C + _strideNode * (_nNodes - 1);
+					localStateDer = stateDer + _strideNode * (_nNodes - 1);
 
-					for (unsigned int elemFace = 1; elemFace < _nCells; elemFace++, localC += _nNodes * strideNodeC, localStateDer += _nNodes * strideNode_stateDer) {
+					for (unsigned int elemFace = 1; elemFace < _nCells; elemFace++, localC += _nNodes * _strideNode, localStateDer += _nNodes * _strideNode) {
 
-						flux = blending * (static_cast<ResidualType>(_curVelocity * localC[0]) // upwind flux for convection
-							+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+						leftState = _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], _polyDeg, true);
+						rightState = _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[_strideNode], 0, false);
+
+						flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
+							+ 0.5 * d_ax * (leftState + rightState) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
 
 						localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
-						localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+						localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
 					}
-					// outlet boundary BC // todo backwards flow! (will be solved once DG operation is being used)
-					flux = blending * (static_cast<ResidualType>(_curVelocity * _C[_nCells * (strideNodeC * _nNodes) - strideNodeC]) // upwind flux for convection
-						+ 0.5 * d_ax * (localC[0] + localC[1]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+					// outlet boundary BC
+					flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? _C[_nCells * (_strideNode * _nNodes) - _strideNode] : _C[0]) // upwind flux for convection
+						+ 0.5 * d_ax * (localC[0] + localC[_strideNode]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
 
-					stateDer[_nCells * (strideNode_stateDer * _nNodes) - strideNode_stateDer] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+					if (_dir == 1)
+						stateDer[_nCells * (_strideNode * _nNodes) - _strideNode] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+					else
+						stateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
 
 				}
 
-				//template<typename StateType, typename ResidualType, typename ParamType>
-				//void old_subcellFVconvectionIntegral(double blending, const StateType* _C, ResidualType* stateDer,
-				//	unsigned int strideNodeC, unsigned int strideNode_stateDer) {
-
-				//	const StateType* localC = _C;
-				//	ResidualType* localStateDer = stateDer;
-				//	ResidualType flux = 0.0;
-
-				//	// TODO backwards flow!
-
-				//	/* subcell FV faces */
-
-				//	for (unsigned int cell = 0; cell < _nCells; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
-
-				//		//FVintegral<StateType, ResidualType, ParamType>(blending, cell, &_C[cell * (strideNodeC * _nNodes)], &stateDer[cell * (strideNode_stateDer * _nNodes)], strideNodeC, strideNode_stateDer);
-
-				//		//if (!indicator) { // todo use indicator
-				//		//	localC +=
-				//		//		localStateDer +=
-				//		//		continue;
-				//		//}
-
-				//		for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
-
-				//			flux = blending * static_cast<ResidualType>(_curVelocity * localC[0]); // upwind flux for convection
-
-				//			localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
-				//			localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
-				//		}
-				//	}
-
-				//	/* DG element interfaces : account DG strong - form like formulation of FV subcell scheme */
-				//	// Not needed, when re-accounted for in DG surface integral (i.e. partly reverted FV subcell DG weak form formulation)
-				//	//localC = _C;
-				//	//localStateDer = stateDer;
-
-				//	//for (unsigned int DGcell = 0; DGcell < _nCells; DGcell++, localC += _nNodes * strideNodeC, localStateDer += _nNodes * strideNode_stateDer) {
-				//	//	// todo use indicator
-
-				//	//	localStateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * blending * static_cast<ResidualType>(_curVelocity) * localC[0];
-				//	//	localStateDer[_polyDeg * strideNode_stateDer] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * blending * static_cast<ResidualType>(_curVelocity) * localC[_polyDeg * strideNodeC];
-				//	//}
-				//}
-
 				template<typename StateType, typename ResidualType, typename ParamType>
-				void subcellFVconvectionIntegral(double* troubledCells, const StateType* _C, ResidualType* stateDer,
-					unsigned int strideNodeC, unsigned int strideNode_stateDer) {
+				void subcellFVconvectionIntegral(double* troubledCells, const StateType* _C, ResidualType* stateDer)
+				{
 
 					const StateType* localC = _C;
 					ResidualType* localStateDer = stateDer;
 					// Upwind flux is given by the blending factor times velocity times the reconstructed FV value at the upwind interface (i.e. left interface value for forward flow, right interface value for backward flow)
 					ResidualType upwindFlux = 0.0;
-
-					// TODO go strides in troubledcells pointer in loop, just as for localC
+					double blending = 0.0;
 
 					/* Subcell FV inner faces (added to DG volume integral in strong form) */
 
@@ -890,98 +844,102 @@ namespace cadet
 						// We iterate over cells and upwind interfaces, i.e. for forward  flow cell_0 with interface_1, cell_1 with interface_2, ... (i.e. right interface from current subcells view)
 
 						// First DG element
-						if (troubledCells[0] != 0.0)
-						{
-							for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
+						blending = troubledCells[0];
+						//if (blending!= 0.0)
+						//{
+						for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
 
-								if (interface == 1)
-									upwindFlux = troubledCells[0] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(static_cast<StateType>(_boundary[0]), localC[0], localC[strideNodeC], interface - 1, true);
-								else
-									upwindFlux = troubledCells[0] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0] - strideNodeC, localC[0], localC[strideNodeC], interface - 1, true);
+							if (interface == 1) // Boundary value required for reconstruction
+								upwindFlux = blending * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(static_cast<StateType>(_boundary[0]), localC[0], localC[_strideNode], interface - 1, true);
+							else
+								upwindFlux = blending * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], interface - 1, true);
+
+							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
+							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
+						}
+						//}
+						//else
+						//{
+						//	localC += _strideNode * (_nNodes - 1);
+						//	localStateDer += _strideNode * (_nNodes - 1);
+						//}
+						// Inner DG elements
+						localC += _strideNode; // move pointer to first subcell of next DG element
+						localStateDer += _strideNode; // move pointer to first subcell of next DG element
+						for (unsigned int cell = 1; cell < _nCells - 1; cell++, localC += _strideNode, localStateDer += _strideNode) {
+							
+							blending = troubledCells[cell * _nComp];
+
+							//if (blending != 0.0)
+							//{
+							for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
+
+								upwindFlux = blending * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], interface - 1, true);
 
 								localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-								localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
+								localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
 							}
-						}
-						else
-						{
-							localC += strideNodeC * (_nNodes - 1);
-							localStateDer += strideNode_stateDer * (_nNodes - 1);
-						}
-						// Inner DG elements
-						localC += strideNodeC; // move pointer to first subcell of next DG element
-						localStateDer += strideNode_stateDer; // move pointer to first subcell of next DG element
-						for (unsigned int cell = 1; cell < _nCells - 1; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
-
-							if (troubledCells[cell * _nComp] != 0.0)
-							{
-								for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
-
-									upwindFlux = troubledCells[cell * _nComp] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0] - strideNodeC, localC[0], localC[strideNodeC], interface - 1, true);
-
-									localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-									localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
-								}
-							}
-							else
-							{
-								localC += strideNodeC * (_nNodes - 1);
-								localStateDer += strideNode_stateDer * (_nNodes - 1);
-							}
+							//}
+							//else
+							//{
+							//	localC += _strideNode * (_nNodes - 1);
+							//	localStateDer += _strideNode * (_nNodes - 1);
+							//}
 						}
 						// Last DG element
-						if (troubledCells[(_nCells - 1) * _nComp] != 0.0)
-						{
-							for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
+						blending = troubledCells[(_nCells - 1) * _nComp];
+						//if (blending != 0.0)
+						//{
+						for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
 
-								upwindFlux = troubledCells[(_nCells - 1) * _nComp] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0] - strideNodeC, localC[0], localC[0] + strideNodeC, interface - 1, true);
+							upwindFlux = blending * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[0] + _strideNode, interface - 1, true);
 
-								localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-								localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
-							}
+							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
+							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
 						}
+						//}
 					}
 					else // Backward flow // todo verify, debug
 					{
 						// We iterate over cells and upwind interfaces, i.e. for backward flow cell_1 with interface_1, cell_2 with interface_2, ... (i.e. left interface from current subcells view)
 
 						// First DG element
-						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
+						for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
 
-							upwindFlux = troubledCells[0] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[strideNodeC], localC[2 * strideNodeC], interface, false);
+							upwindFlux = troubledCells[0] * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[2 * _strideNode], interface, false);
 
 							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
+							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
 						}
 						// Inner DG elements
-						localC += strideNodeC; // move pointer to first subcell of next DG element
-						localStateDer += strideNode_stateDer; // move pointer to first subcell of next DG element
-						for (unsigned int cell = 1; cell < _nCells - 1; cell++, localC += strideNodeC, localStateDer += strideNode_stateDer) {
+						localC += _strideNode; // move pointer to first subcell of next DG element
+						localStateDer += _strideNode; // move pointer to first subcell of next DG element
+						for (unsigned int cell = 1; cell < _nCells - 1; cell++, localC += _strideNode, localStateDer += _strideNode) {
 							
 							// todo  if (troubledCells[0] > 0.0)
-							for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
+							for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
 
-								upwindFlux = troubledCells[cell * _nComp] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[strideNodeC], localC[2 * strideNodeC], interface, false);
+								upwindFlux = troubledCells[cell * _nComp] * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[2 * _strideNode], interface, false);
 
 								localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-								localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
+								localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
 							}
 						//else // TODO
 						//{
-						//localC += strideNodeC * (_nNodes - 1);
-						//localStateDer += strideNode_stateDer * (_nNodes - 1);
+						//localC += _strideNode * (_nNodes - 1);
+						//localStateDer += _strideNode * (_nNodes - 1);
 						//}
 						}
 						// Last DG element
-						for (int interface = 1; interface < _nNodes; interface++, localC += strideNodeC, localStateDer += strideNode_stateDer) { // Note: We iterate only over inner subcell FV interfaces
+						for (int interface = 1; interface < _nNodes; interface++, localC += _strideNode, localStateDer += _strideNode) { // Note: We iterate only over inner subcell FV interfaces
 
-							if (interface == _nNodes - 1)
-								upwindFlux = troubledCells[(_nCells - 1) * _nComp] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[strideNodeC], static_cast<StateType>(_boundary[0]), interface, false);
+							if (interface == _nNodes - 1) // Boundary value required for reconstruction
+								upwindFlux = troubledCells[(_nCells - 1) * _nComp] * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], static_cast<StateType>(_boundary[0]), interface, false);
 							else
-								upwindFlux = troubledCells[(_nCells - 1) * _nComp] * static_cast<StateType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[strideNodeC], localC[2 * strideNodeC], interface, false);
+								upwindFlux = troubledCells[(_nCells - 1) * _nComp] * static_cast<ParamType>(_curVelocity) * _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[2 * _strideNode], interface, false);
 
 							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * upwindFlux;
-							localStateDer[strideNode_stateDer] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
+							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * upwindFlux;
 						}
 					}
 					/* DG element interfaces, i.e. subcell FV outer/element boundary faces (added to DG volume integral in strong form) */

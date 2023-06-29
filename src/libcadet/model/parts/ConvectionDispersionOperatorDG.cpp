@@ -503,13 +503,13 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		double DGblending = 1.0 - _maxBlending;
 
 		if (_OSmode == 2 && _maxBlending > 0.0) // Element-wise  lower order subcell FV blending for advection, treat dispersion with high order DG.
-			subcellFVconvectionIntegral<StateType, ResidualType, ParamType>(_troubledCells + comp, y + offsetC() + comp, res + offsetC() + comp, _strideNode, _strideNode);
+			subcellFVconvectionIntegral<StateType, ResidualType, ParamType>(_troubledCells + comp, y + offsetC() + comp, res + offsetC() + comp);
 
 		// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
 
-		else if (_OSmode == 4) // Subcell FV without blending, i.e. pure FV on DG grid for both advection and dispersion
+		else if (_OSmode == 4) // Subcell FV for both, advection and dispersion and without blending, i.e. pure FV // todo enable blending? -> ensure mass conservation for dispersive flux across DG elements
 		{
-			subcellFVconvDispIntegral<StateType, ResidualType, ParamType>(y + offsetC() + comp, res + offsetC() + comp, d_ax, _strideNode, _strideNode);
+			subcellFVconvDispIntegral<StateType, ResidualType, ParamType>(1.0, y + offsetC() + comp, res + offsetC() + comp, d_ax);
 			continue;
 		}
 

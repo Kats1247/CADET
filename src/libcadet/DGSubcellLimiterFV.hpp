@@ -167,7 +167,7 @@ namespace cadet
 				StateType slope;
 
 				// Boundary cell reconstruction
-				if (subcellIdx == 0) // note: does not happen for backward flow
+				if (subcellIdx == 0)
 				{
 					switch (_FVboundaryTreatment)
 					{
@@ -184,7 +184,7 @@ namespace cadet
 						return centerState;
 					}
 				}
-				else if (subcellIdx == _nNodes - 1) // note: does not happen for forward flow
+				else if (subcellIdx == _nNodes - 1)
 				{
 					switch (_FVboundaryTreatment)
 					{
