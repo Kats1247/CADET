@@ -31,6 +31,7 @@ namespace cadet
 		// todo: no templates for virtual functions. Is there another way to overload?
 		virtual double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) = 0;
 		virtual double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) = 0;
+		inline virtual bool timeRelaxation() = 0;
 	};
 	
 	class AllElementsIndicator : public SmoothnessIndicator {
@@ -41,6 +42,7 @@ namespace cadet
 
 		double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override { return 1.0; }
 		double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override { return 1.0; }
+		inline bool timeRelaxation() { return false; }
 
 	};
 
@@ -48,18 +50,19 @@ namespace cadet
 
 	public:
 
-		ModalEnergyIndicator(int polyDeg, const Eigen::MatrixXd& modalVanInv, double nodalCoefThreshold, double nodalCoefShift)
-			: _polyDeg(polyDeg), _modalVanInv(modalVanInv), _nodalCoefThreshold(nodalCoefThreshold), _nodalCoefShift(nodalCoefShift)
+		ModalEnergyIndicator(int polyDeg, const Eigen::MatrixXd& modalVanInv, int numModes, double nodalCoefThreshold, double nodalCoefShift, bool timeRelax)
+			: _polyDeg(polyDeg), _numModes(numModes), _modalVanInv(modalVanInv), _nodalCoefThreshold(nodalCoefThreshold), _nodalCoefShift(nodalCoefShift), _timeRelaxation(timeRelax)
 		{
 			_nNodes = _polyDeg + 1;
 			_modalCoeff.resize(_nNodes);
 			_modalCoeff.setZero();
 		}
 
+		inline bool timeRelaxation() { return _timeRelaxation; }
+
 		double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
 		{
-
-			// TODO: how to choose these constants, store them.
+			// TODO: default constants, store them.
 			const double _s = 9.2102;
 
 			Eigen::Map<const Eigen::VectorXd, 0, Eigen::InnerStride<Eigen::Dynamic>> _C(localC, _nNodes, Eigen::InnerStride<Eigen::Dynamic>(strideNode));
@@ -69,21 +72,20 @@ namespace cadet
 			else
 				_modalCoeff = _modalVanInv * (_C + _nodalCoefShift * Eigen::VectorXd::Ones(_nNodes));
 
-
 			double modalEnergySquareSum = _modalCoeff.cwiseAbs2().sum();
 			double modeEnergy = (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg], 2.0) / modalEnergySquareSum;
 
-			modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
-			modeEnergy = std::max(modeEnergy, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
-
+			if (_numModes == 2) {
+				modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
+				modeEnergy = std::max(modeEnergy, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
+			}
 
 			const double _T = 0.5 * std::pow(10.0, -1.8 * std::pow(static_cast<double>(_nNodes), 0.25)); // todo store this constant
 			return 1.0 / (1.0 + exp(-_s / _T * (modeEnergy - _T)));
 		}
 		double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
 		{
-
-			// TODO: how to choose these constants, store them.
+			// TODO: default constants, store them.
 			const double _s = 9.2102;
 
 			Eigen::Map<const Eigen::Vector<active, Eigen::Dynamic>, 0, Eigen::InnerStride<Eigen::Dynamic>> _C(localC, _nNodes, Eigen::InnerStride<Eigen::Dynamic>(strideNode));
@@ -96,9 +98,10 @@ namespace cadet
 			double modalEnergySquareSum = _modalCoeff.cwiseAbs2().sum();
 			double modeEnergy = (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg], 2.0) / modalEnergySquareSum;
 
-			modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
-			modeEnergy = std::max(modeEnergy, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
-
+			if (_numModes == 2) {
+				modalEnergySquareSum = _modalCoeff.segment(0, _polyDeg).cwiseAbs2().sum();
+				modeEnergy = std::max(modeEnergy, (modalEnergySquareSum == 0.0) ? 0.0 : std::pow(_modalCoeff[_polyDeg - 1], 2.0) / modalEnergySquareSum);
+			}
 
 			const double _T = 0.5 * std::pow(10.0, -1.8 * std::pow(static_cast<double>(_nNodes), 0.25)); // 10-1.8(N + 1)0.2; // todo store this constant
 			return 1.0 / (1.0 + exp(-_s / _T * (modeEnergy - _T)));
@@ -113,7 +116,8 @@ namespace cadet
 		double _nodalCoefShift; //!< Shift for nodal polynomial coefficients (To get c(z) >= eps > 0 at constant 0 concentration values)
 		Eigen::VectorXd _modalCoeff; //!< Modal polynomial coefficient memory buffer
 		Eigen::MatrixXd _modalVanInv; //!< Inverse Vandermonde matrix of modal polynomial basis
-
+		int _numModes; //!< Number of modes to be considered in modal energy comparison
+		bool _timeRelaxation; //!<
 	};
 
 	//class wenoIndicator : public SmoothnessIndicator {

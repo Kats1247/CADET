@@ -99,7 +99,7 @@ namespace cadet
 			delete[] _subcellGrid;
 		}
 
-		void init(std::string limiter, const int FVorder, const int  boundaryTreatment, const unsigned int nNodes, double* LGLnodes, double* invWeights, Eigen::MatrixXd modalVanInv, const unsigned int nCells, const unsigned int nComp) {
+		void init(std::string limiter, const int FVorder, const int  boundaryTreatment, const unsigned int nNodes, double* LGLnodes, double* invWeights, const unsigned int nCells, const unsigned int nComp) {
 
 			_nNodes = nNodes;
 			_polyDeg = nNodes - 1;

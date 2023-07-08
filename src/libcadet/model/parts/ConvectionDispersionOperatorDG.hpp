@@ -198,6 +198,7 @@ namespace cadet
 				DGSubcellLimiterFV _subcellLimiter;
 				std::unique_ptr<SmoothnessIndicator> _smoothnessIndicator;
 				double* _troubledCells; //!< Troubled/oscillatory DG cell indicator
+				bool _calc_smoothness_indicator; //!< Determines whether or not the smoothness indicator is evaluated
 
 				// Simulation parameters
 				active _colLength; //!< Column length \f$ L \f$

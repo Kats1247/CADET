@@ -126,7 +126,12 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 		/* Configure smoothness/troubled cell indicator, i.e. shock detection */
 
+		const bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
+		if (write_smoothness_indicator)
+			_troubledCells = new double[nCells * nComp];
+
 		std::string smoothness_indicator = paramProvider.exists("SMOOTHNESS_INDICATOR") ? paramProvider.getString("SMOOTHNESS_INDICATOR") : "MODAL_ENERGY_LEGENDRE";
+
 		if (smoothness_indicator == "MODAL_ENERGY_LEGENDRE")
 		{
 			_blendingThreshold = paramProvider.exists("BLENDING_THRESHOLD") ? paramProvider.getDouble("BLENDING_THRESHOLD") : 0.0; // 0.01; // todo default value
@@ -135,7 +140,13 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 			double nodalCoefThreshold = paramProvider.exists("NODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("NODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
 			double nodalCoefShift = paramProvider.exists("NODAL_COEFFICIENT_SHIFT") ? paramProvider.getDouble("NODAL_COEFFICIENT_SHIFT") : 0.0; // 0.1; // todo default value
-			_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse(), nodalCoefThreshold, nodalCoefShift);
+			int numModes = paramProvider.exists("NUM_MODES") ? paramProvider.getInt("NUM_MODES") : 2; // todo default value
+			if (numModes != 1 && numModes != 2)
+				throw InvalidParameterException("Number of modes to compare modal energy must be 1 or 2, but was specified as " + std::to_string(numModes));
+
+			bool timeRelaxation = paramProvider.exists("TIME_RELAXATION") ? paramProvider.getBool("TIME_RELAXATION") : false;
+			
+			_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse(), numModes, nodalCoefThreshold, nodalCoefShift, timeRelaxation);
 		}
 		//else if (smoothness_indicator == "MODAL_ENERGY_PRIMITIVE") // todo? add other modal polynomial bases
 		//{
@@ -159,7 +170,7 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 			 double eps = paramProvider.exists("WENO_EPS") ? paramProvider.getDouble("WENO_EPS") : 1e-6;
 			 double r = paramProvider.exists("WENO_R") ? paramProvider.getDouble("WENO_R") : 2.0;
 			 double gamma = paramProvider.exists("WENO_GAMMA") ? paramProvider.getDouble("WENO_GAMMA") : 0.998;
-			 bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
+
 			 std::string limiter = paramProvider.exists("WENO_LIMITER") ? paramProvider.getString("WENO_LIMITER") : "MINMOD";
 
 			 _weno.init(limiter, eps, r, gamma, &_invWeights[0], _polyDerM, _nCells, _nNodes, _nComp);
@@ -187,16 +198,12 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 			 const int _FVboundaryTreatment = paramProvider.exists("SUBCELL_FV_BOUNDARY_TREATMENT") ? paramProvider.getInt("SUBCELL_FV_BOUNDARY_TREATMENT") : 0; // todo choose default
 
-			 const bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
-			 if (write_smoothness_indicator)
-				 _troubledCells = new double[nCells * nComp];
-
-			 MatrixXd modalVanInv = getVandermonde_LEGENDRE().inverse();
-
-			 _subcellLimiter.init(limiter, _FVorder, _FVboundaryTreatment, _nNodes, &_nodes[0], &_invWeights[0], modalVanInv, _nCells, _nComp);
+			 _subcellLimiter.init(limiter, _FVorder, _FVboundaryTreatment, _nNodes, &_nodes[0], &_invWeights[0], _nCells, _nComp);
 		 }
 		 else if (osMethod != "NONE")
 			throw InvalidParameterException("Unknown oscillation suppression mechanism " + osMethod + " in oscillation_suppression_mode");
+
+		 _calc_smoothness_indicator = write_smoothness_indicator || (_OSmode != 0 && _OSmode != 4);
 
 		paramProvider.popScope();
 	}
@@ -474,13 +481,19 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		Eigen::Map<Vector<StateType, Dynamic>, 0, InnerStride<>> _g(reinterpret_cast<StateType*>(&_g[0]), _nPoints, InnerStride<>(1));
 
 		// Calculate smoothness indicator if oscillation suppression is active
-		if (_OSmode != 0)
+		if (_OSmode != 0 && _OSmode != 4)
 		{
+			double oldIndicator = 0.0;
+
 			for (unsigned int cell = 0; cell < _nCells; cell++)
 			{
+				oldIndicator = _troubledCells[comp + cell * _nComp];
+
 				_troubledCells[comp + cell * _nComp] = std::min(_maxBlending, _smoothnessIndicator->calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, _nComp, cell));
 				if (_troubledCells[comp + cell * _nComp] < _blendingThreshold)
 					_troubledCells[comp + cell * _nComp] = 0.0;
+				else if (_smoothnessIndicator->timeRelaxation())
+					_troubledCells[comp + cell * _nComp] = std::max(0.7 * oldIndicator, _troubledCells[comp + cell * _nComp]);
 			}
 			//if (_OSmode == 1) // WENO
 			//{
