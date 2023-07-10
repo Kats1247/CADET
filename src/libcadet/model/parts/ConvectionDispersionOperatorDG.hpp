@@ -184,7 +184,6 @@ namespace cadet
 				Eigen::MatrixXd* _DGjacAxDispBlocks; //!< Unique Jacobian blocks for axial dispersion
 				Eigen::MatrixXd _DGjacAxConvBlock; //!< Unique Jacobian blocks for axial convection
 
-
 				Eigen::Vector<active, Eigen::Dynamic> _g; //!< auxiliary variable
 				Eigen::Vector<active, Eigen::Dynamic> _h; //!< auxiliary substitute
 				Eigen::Vector<active, Eigen::Dynamic> _surfaceFlux; //!< stores the surface flux values
@@ -777,6 +776,7 @@ namespace cadet
 					StateType rightState = 0.0;
 					ResidualType* localStateDer = stateDer;
 					ResidualType flux = 0.0;
+					ResidualType derivative = 0.0;
 
 					// Subcell inner faces
 					for (unsigned int cell = 0; cell < _nCells; cell++, localC += _strideNode, localStateDer += _strideNode) {
@@ -786,23 +786,28 @@ namespace cadet
 							leftState = _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], interface - 1, true);
 							rightState = _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[_strideNode], interface, false);
 
-							flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
-								+ 0.5 * d_ax * (leftState + rightState) * (2 / (_invWeights[interface - 1] + _invWeights[interface]))); // central flux for diffusion with first order FD approximation of c_x
+							// Approximate derivative by central finite difference. Only central for N_d = 1, otherwise some weighted central. We have distance between the two points as h = 0.5 * summed cell sizes * reference element mapping
+							derivative = (rightState - leftState) / (0.5 * (_subcellLimiter.LGLweights(interface - 1) + _subcellLimiter.LGLweights(interface)) * 0.5 * static_cast<ParamType>(_deltaZ));
 
-							localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface - 1] * flux;
-							localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[interface] * flux;
+							flux = blending * (2.0 / static_cast<ParamType>(_deltaZ)) * // blending coefficient and mapping
+								(static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
+								- d_ax * derivative); // central FD approximation of c_x
+
+							// add flux divided by respective cell volume. Note that mapping was already applied
+							localStateDer[0] += flux * _invWeights[interface - 1];
+							localStateDer[_strideNode] -= flux * _invWeights[interface];
 						}
 					}
 
 					// DG element faces
-					// inlet boundary BC
-					flux = blending * static_cast<ResidualType>(_curVelocity * _boundary[0]);
+					// Inlet boundary BC
+					flux = blending * (2.0 / static_cast<ParamType>(_deltaZ)) * static_cast<ResidualType>(_curVelocity * _boundary[0]);
 					if(_dir == 1)
-						stateDer[0] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+						stateDer[0] -= flux * _invWeights[0];
 					else
-						stateDer[(_nPoints - 1) * _strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+						stateDer[(_nPoints - 1) * _strideNode] -= flux * _invWeights[_polyDeg];
 
-					// inner DG element faces
+					// Inner DG element faces
 					localC = _C + _strideNode * (_nNodes - 1);
 					localStateDer = stateDer + _strideNode * (_nNodes - 1);
 
@@ -811,20 +816,22 @@ namespace cadet
 						leftState = _subcellLimiter.reconstructedInterfaceValue<StateType>(*(localC - _strideNode), localC[0], localC[_strideNode], _polyDeg, true);
 						rightState = _subcellLimiter.reconstructedInterfaceValue<StateType>(localC[0], localC[_strideNode], localC[_strideNode], 0, false);
 
-						flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
-							+ 0.5 * d_ax * (leftState + rightState) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+						derivative = (rightState - leftState) / (0.5 * (_subcellLimiter.LGLweights(0) + _subcellLimiter.LGLweights(_polyDeg)) * 0.5 * static_cast<ParamType>(_deltaZ));
 
-						localStateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
-						localStateDer[_strideNode] -= 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[0] * flux;
+						flux = blending * (2.0 / static_cast<ParamType>(_deltaZ)) *
+							(static_cast<ParamType>(_curVelocity) * (_dir == 1 ? leftState : rightState) // upwind flux for convection
+							- d_ax * derivative); // central FD approximation of c_x
+
+						localStateDer[0] += flux * _invWeights[0];
+						localStateDer[_strideNode] -= flux * _invWeights[_polyDeg];
 					}
 					// outlet boundary BC
-					flux = blending * (static_cast<ParamType>(_curVelocity) * (_dir == 1 ? _C[_nCells * (_strideNode * _nNodes) - _strideNode] : _C[0]) // upwind flux for convection
-						+ 0.5 * d_ax * (localC[0] + localC[_strideNode]) * (2 / (_invWeights[_polyDeg] + _invWeights[0]))); // central flux for diffusion with first order FD approximation of c_x
+					flux = blending * (2.0 / static_cast<ParamType>(_deltaZ)) * static_cast<ParamType>(_curVelocity) * (_dir == 1 ? _C[_nCells * (_strideNode * _nNodes) - _strideNode] : _C[0]); // upwind flux for convection
 
 					if (_dir == 1)
-						stateDer[_nCells * (_strideNode * _nNodes) - _strideNode] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+						stateDer[_nCells * (_strideNode * _nNodes) - _strideNode] += flux * _invWeights[_polyDeg];
 					else
-						stateDer[0] += 2.0 / static_cast<ParamType>(_deltaZ) * _invWeights[_polyDeg] * flux;
+						stateDer[0] += flux * _invWeights[0];
 
 				}
 

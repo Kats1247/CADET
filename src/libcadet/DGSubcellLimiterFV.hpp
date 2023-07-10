@@ -28,6 +28,9 @@
 
 namespace cadet
 {
+	/**
+	 * @brief Implements the subcell FV slope limited reconstruction
+	 */
 	// todo active types required in reconstruction?
 	class SlopeLimiterFV {
 	public:
@@ -36,10 +39,28 @@ namespace cadet
 		virtual active call(active slope0, active slope1) = 0;
 	};
 
-	class NoLimiter : public SlopeLimiterFV {
+	/**
+	 * @brief Implements unlimited forward slope reconstruction
+	 */
+	class NoLimiterForward : public SlopeLimiterFV {
 
 	public:
-		NoLimiter() {}
+		NoLimiterForward() {}
+		double call(double slope0, double slope1) override {
+			return slope1;
+		}
+		active call(active slope0, active slope1) override {
+			return slope1;
+		}
+	};
+
+	/**
+	 * @brief Implements unlimited backward slope reconstruction
+	 */
+	class NoLimiterBackward : public SlopeLimiterFV {
+
+	public:
+		NoLimiterBackward() {}
 		double call(double slope0, double slope1) override {
 			return slope0;
 		}
@@ -47,6 +68,36 @@ namespace cadet
 			return slope0;
 		}
 	};
+	
+	/**
+	 * @brief Disables reconstruction
+	 */
+	class NoLimiter1stOrder : public SlopeLimiterFV {
+
+	public:
+		NoLimiter1stOrder() {}
+		double call(double slope0, double slope1) override {
+			return 0.0;
+		}
+		active call(active slope0, active slope1) override {
+			return 0.0;
+		}
+	};
+
+	///**
+	// * @brief Implements unlimited central slope reconstruction
+	// */
+	//class NoLimiterCentral : public SlopeLimiterFV {
+
+	//public:
+	//	NoLimiterCentral() {}
+	//	double call(double slope0, double slope1) override {
+	//		return slope0;
+	//	}
+	//	active call(active slope0, active slope1) override {
+	//		return slope0;
+	//	}
+	//};
 
 	class Minmod : public SlopeLimiterFV {
 
@@ -121,8 +172,12 @@ namespace cadet
 			if (_FVorder == 2) {
 				if (limiter == "MINMOD")
 					_slope_limiter = std::make_unique<Minmod>();
+				else if (limiter == "UNLIMITED_FORWARD_RECONSTRUCTION")
+					_slope_limiter = std::make_unique<NoLimiterForward>();
+				else if (limiter == "UNLIMITED_BACKWARD_RECONSTRUCTION")
+					_slope_limiter = std::make_unique<NoLimiterBackward>();
 				else if (limiter == "NONE")
-					_slope_limiter = std::make_unique<NoLimiter>();
+					_slope_limiter = std::make_unique<NoLimiter1stOrder>();
 				else
 					throw InvalidParameterException("Subcell FV slope limiter " + limiter + " unknown.");
 
@@ -210,6 +265,8 @@ namespace cadet
 					return centerState + slope * (_subcellGrid[subcellIdx] - _LGLnodes[subcellIdx]); // Return state at left interface, i.e. backward flow upwind state
 			}
 		}
+
+		inline double LGLweights(int idx) { return _LGLweights[idx]; }
 
 		private:
 
