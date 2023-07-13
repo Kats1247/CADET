@@ -372,6 +372,8 @@ bool AxialConvectionDispersionOperatorBaseDG::notifyDiscontinuousSectionTransiti
 			_curVelocity *= -1.0;
 	}
 
+	_subcellLimiter.notifyDiscontinuousSectionTransition(_dir);
+
 	// Remaining case: _velocity is empty and _crossSection <= 0.0
 	// _curVelocity is goverend by network flow rate provided in setFlowRates().
 	// Direction never changes (always forward, that is, _dir = 1)-
@@ -517,12 +519,11 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 
 		if (_OSmode == 2 && _maxBlending > 0.0) // Element-wise  lower order subcell FV blending for advection, treat dispersion with high order DG.
 			subcellFVconvectionIntegral<StateType, ResidualType, ParamType>(_troubledCells + comp, y + offsetC() + comp, res + offsetC() + comp);
-
 		// else if (_OSmode == 3) // todo ? subcell limiting with subelement-wise blending
 
 		else if (_OSmode == 4) // Subcell FV for both, advection and dispersion and without blending, i.e. pure FV // todo enable blending? -> ensure mass conservation for dispersive flux across DG elements
 		{
-			subcellFVconvDispIntegral<StateType, ResidualType, ParamType>(1.0, y + offsetC() + comp, res + offsetC() + comp, d_ax);
+			subcellFVconvDispIntegral<StateType, ResidualType, ParamType>(y + offsetC() + comp, res + offsetC() + comp, d_ax);
 			continue;
 		}
 
@@ -537,7 +538,7 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// Compute auxiliary system g = d c / d x  //
 		// ========================================//
 
-		 // DG volume integral in strong form
+		// DG volume integral in strong form
 		volumeIntegral<StateType, StateType>(_C, _g);
 
 		// Calculate numerical flux values c*
@@ -569,13 +570,13 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// Calculate numerical flux values h*
 		InterfaceFlux<StateType, ParamType>(y + offsetC() + comp, d_ax);
 
-		// Not needed, when re-accounted for in FV subcell residual (i.e. partly reverted FV subcell DG weak form formulation)
-		//_h += 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * FVblending).template cast<ResidualType>();
+		// By leaving the following out, the surface integral computes B (h^* - \hat{h}) with \hat{h} = h - \alpha u c, i.e. \hat{h} equals the substitute h minus the subcell (convection) part.
+		// This way we can leave out any interface flux computations at DG-element boundaries in the subcell FV scheme.
+		// _h += 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * FVblending).template cast<ResidualType>();
 
 		// DG surface integral in strong form
 		surfaceIntegral<ResidualType, ResidualType>(&_h[0], res + offsetC() + comp, 1u, _nNodes, _strideNode, _strideCell);
 	}
-
 	return 0;
 }
 /**
