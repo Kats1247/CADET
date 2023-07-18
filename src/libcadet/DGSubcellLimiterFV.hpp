@@ -30,95 +30,222 @@ namespace cadet
 {
 	/**
 	 * @brief Implements the subcell FV slope limited reconstruction
+	 * @detail Defines the 2nd order (linear) subcell FV reconstruction by implementing its limiter.
 	 */
 	// todo active types required in reconstruction?
 	class SlopeLimiterFV {
 	public:
+		enum class SlopeLimiterID : int
+		{
+			NoLimiter1stOrder = 0, //!< 1st order (constant) reconstruction, i.e. no reconstruction
+			Minmod = 1, //!< Minmod slope limiter
+			Superbee = 2, //!< Superbee slope limiter
+			vanLeer = 3, //!< van Leer slope limiter
+			vanAlbada = 4, //!< van Alaba slope limiter
+			RelaxedVanAlbada = 6, //!< relaxed van Alaba slope limiter
+			NoLimiterForward = -1, //!< unlimited forward FD reconstruction
+			NoLimiterBackward = -2, //!< unlimited backward FD reconstruction
+		};
+
 		virtual ~SlopeLimiterFV() {}
-		virtual double call(double slope0, double slope1) = 0;
-		virtual active call(active slope0, active slope1) = 0;
+		virtual double call(double fwdSlope, double bwdSlope) = 0;
+		virtual active call(active fwdSlope, active bwdSlope) = 0;
+		virtual SlopeLimiterID getID() = 0;
 	};
 
 	/**
-	 * @brief Implements unlimited forward slope reconstruction
-	 */
-	class NoLimiterForward : public SlopeLimiterFV {
-
-	public:
-		NoLimiterForward() {}
-		double call(double slope0, double slope1) override {
-			return slope1;
-		}
-		active call(active slope0, active slope1) override {
-			return slope1;
-		}
-	};
-
-	/**
-	 * @brief Implements unlimited backward slope reconstruction
-	 */
-	class NoLimiterBackward : public SlopeLimiterFV {
-
-	public:
-		NoLimiterBackward() {}
-		double call(double slope0, double slope1) override {
-			return slope0;
-		}
-		active call(active slope0, active slope1) override {
-			return slope0;
-		}
-	};
-	
-	/**
-	 * @brief Disables reconstruction
+	 * @brief 1st order (constant) reconstruction
 	 */
 	class NoLimiter1stOrder : public SlopeLimiterFV {
 
 	public:
 		NoLimiter1stOrder() {}
-		double call(double slope0, double slope1) override {
+		double call(double fwdSlope, double bwdSlope) override {
 			return 0.0;
 		}
-		active call(active slope0, active slope1) override {
+		active call(active fwdSlope, active bwdSlope) override {
 			return 0.0;
 		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::NoLimiter1stOrder; }
 	};
 
-	///**
-	// * @brief Implements unlimited central slope reconstruction
-	// */
-	//class NoLimiterCentral : public SlopeLimiterFV {
-
-	//public:
-	//	NoLimiterCentral() {}
-	//	double call(double slope0, double slope1) override {
-	//		return slope0;
-	//	}
-	//	active call(active slope0, active slope1) override {
-	//		return slope0;
-	//	}
-	//};
-
+	/**
+	 * @brief MINMOD reconstruction slope limiter
+	 */
 	class Minmod : public SlopeLimiterFV {
 
 	public:
 		Minmod() {}
-		double call(double slope0, double slope1) override {
-			if (std::signbit(slope0) == std::signbit(slope1))
-				return std::copysign(std::min(std::abs(slope0), std::abs(slope1)), slope0);
+		double call(double fwdSlope, double bwdSlope) override {
+			if (std::signbit(fwdSlope) == std::signbit(bwdSlope))
+				return std::copysign(std::min(std::abs(fwdSlope), std::abs(bwdSlope)), fwdSlope);
 			else
 				return 0.0;
 		}
-		active call(active slope0, active slope1) override {
+		active call(active fwdSlope, active bwdSlope) override {
 
-			if (std::signbit(static_cast<double>(slope0)) == std::signbit(static_cast<double>(slope1)))
-				return abs(static_cast<double>(slope0)) < abs(static_cast<double>(slope1)) ? slope0 : slope1;
+			if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+				return abs(static_cast<double>(fwdSlope)) < abs(static_cast<double>(bwdSlope)) ? fwdSlope : bwdSlope;
 			else
 				return active(0.0);
 		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::Minmod; }
 	};
 
-	// todo, note: if more slope limiters are added, note that they have to be symmetrical in the current implementation (i.e. in reconstruction function reconstructedUpwindValue)
+	/**
+	 * @brief Superbee slope limiter for reconstruction
+	 */
+	class Superbee : public SlopeLimiterFV {
+
+	public:
+		Superbee() {}
+
+		double maxmod(double fwdSlope, double bwdSlope) {
+			if (std::signbit(fwdSlope) == std::signbit(bwdSlope))
+				return std::copysign(std::max(std::abs(fwdSlope), std::abs(bwdSlope)), fwdSlope);
+			else
+				return 0.0;
+		}
+		active maxmod(active fwdSlope, active bwdSlope) {
+
+			if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+				return abs(static_cast<double>(fwdSlope)) < abs(static_cast<double>(bwdSlope)) ? bwdSlope : fwdSlope;
+			else
+				return active(0.0);
+		}
+
+		double call(double fwdSlope, double bwdSlope) override {
+			return maxmod(minmod.call(2 * fwdSlope, bwdSlope), minmod.call(fwdSlope, 2 * bwdSlope));
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			return maxmod(minmod.call(2 * fwdSlope, bwdSlope), minmod.call(fwdSlope, 2 * bwdSlope));
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::Superbee; }
+
+	private:
+		Minmod minmod;
+	};
+
+	/**
+	 * @brief van Leer slope limiter for reconstruction
+	 */
+	class vanLeer : public SlopeLimiterFV {
+
+	public:
+		vanLeer() {}
+
+		double call(double fwdSlope, double bwdSlope) override {
+			if (std::signbit(fwdSlope) == std::signbit(bwdSlope))
+			{
+				if (std::abs(fwdSlope) < eps && std::abs(bwdSlope) < eps) // catch zero-division problem
+					return 0.0;
+				else
+					return (2.0 * fwdSlope * bwdSlope) / (fwdSlope + bwdSlope);
+			}
+			else
+				return 0.0;
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+			{
+				if (abs(fwdSlope) < eps && abs(bwdSlope) < eps) // catch zero-division problem
+					return 0.0;
+				else
+					return (2.0 * fwdSlope * bwdSlope) / (fwdSlope + bwdSlope);
+			}
+			else
+				return 0.0;
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::vanLeer; }
+
+	private:
+		const double eps = 1e-8;
+	};
+
+	/**
+	 * @brief van Albada slope limiter for reconstruction
+	 */
+	class vanAlbada : public SlopeLimiterFV {
+
+	public:
+		vanAlbada() {}
+
+		double call(double fwdSlope, double bwdSlope) override {
+			if (std::signbit(fwdSlope) == std::signbit(bwdSlope))
+				return ((fwdSlope * fwdSlope + eps) * bwdSlope + ((bwdSlope * bwdSlope + eps) * fwdSlope)) / (fwdSlope * fwdSlope + bwdSlope * bwdSlope + 2.0 * eps);
+			else
+				return 0.0;
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+				return ((fwdSlope * fwdSlope + eps) * bwdSlope + ((bwdSlope * bwdSlope + eps) * fwdSlope)) / (fwdSlope * fwdSlope + bwdSlope * bwdSlope + 2.0 * eps);
+			else
+				return 0.0;
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::vanAlbada; }
+
+	private:
+		const double eps = 1e-6; // constant chosen according to https://doi.org/10.2514/3.9465
+	};
+
+	/**
+	 * @brief relaxed van Albada slope limiter for reconstruction
+	 * @detail relaxed w.r.t. required arithmetic operations, according to https://doi.org/10.1007/978-981-15-9011-5_5
+	 */
+	class RelaxedVanAlbada : public SlopeLimiterFV {
+
+	public:
+		RelaxedVanAlbada() {}
+
+		double call(double fwdSlope, double bwdSlope) override {
+			if (std::signbit(fwdSlope) == std::signbit(bwdSlope))
+				return fwdSlope * (2.0 * fwdSlope * bwdSlope + eps) / (fwdSlope * fwdSlope + bwdSlope * bwdSlope + eps);
+			else
+				return 0.0;
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+				return fwdSlope * (2.0 * fwdSlope * bwdSlope + eps) / (fwdSlope * fwdSlope + bwdSlope * bwdSlope + eps);
+			else
+				return 0.0;
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::RelaxedVanAlbada; }
+
+	private:
+		const double eps = 1e-6; // constant chosen according to https://doi.org/10.2514/3.9465
+	};
+
+	/**
+	 * @brief Implements unlimited forward slope for reconstruction
+	 */
+	class NoLimiterForward : public SlopeLimiterFV {
+
+	public:
+		NoLimiterForward() {}
+		double call(double fwdSlope, double bwdSlope) override {
+			return bwdSlope;
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			return bwdSlope;
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::NoLimiterForward; }
+	};
+
+	/**
+	 * @brief Implements unlimited backward slope for reconstruction
+	 */
+	class NoLimiterBackward : public SlopeLimiterFV {
+
+	public:
+		NoLimiterBackward() {}
+		double call(double fwdSlope, double bwdSlope) override {
+			return fwdSlope;
+		}
+		active call(active fwdSlope, active bwdSlope) override {
+			return fwdSlope;
+		}
+		SlopeLimiterID getID() override { return SlopeLimiterID::NoLimiterBackward; }
+	};
 
 	/**
 	 * @brief Implements the subcell FV limiting scheme for convection
@@ -169,16 +296,22 @@ namespace cadet
 				_subcellGrid[subcell] = _subcellGrid[subcell - 1] + _LGLweights[subcell - 1];
 
 			_FVorder = FVorder;
+			_slope_limiter = std::make_unique<NoLimiter1stOrder>();
+
 			if (_FVorder == 2) {
 				if (limiter == "MINMOD")
 					_slope_limiter = std::make_unique<Minmod>();
 				else if (limiter == "UNLIMITED_FORWARD_RECONSTRUCTION")
 					_slope_limiter = std::make_unique<NoLimiterForward>();
-				else if (limiter == "UNLIMITED_BACKWARD_RECONSTRUCTION")
-					_slope_limiter = std::make_unique<NoLimiterBackward>();
-				else if (limiter == "NONE")
-					_slope_limiter = std::make_unique<NoLimiter1stOrder>();
-				else
+				else if (limiter == "SUPERBEE")
+					_slope_limiter = std::make_unique<Superbee>();
+				else if (limiter == "VANLEER")
+					_slope_limiter = std::make_unique<vanLeer>();
+				else if (limiter == "VANALBADA")
+					_slope_limiter = std::make_unique<vanAlbada>();
+				else if (limiter == "RELAXED_VANALBADA")
+					_slope_limiter = std::make_unique<RelaxedVanAlbada>();
+				else if (limiter != "NONE")
 					throw InvalidParameterException("Subcell FV slope limiter " + limiter + " unknown.");
 
 				switch (boundaryTreatment)
@@ -198,6 +331,17 @@ namespace cadet
 			}
 			else if (_FVorder != 1)
 				throw InvalidParameterException("Subcell FV order must be 1 or 2, but was specified as " + std::to_string(_FVorder));
+		}
+
+		void notifyDiscontinuousSectionTransition(int direction) {
+
+			// Forward FD slope reconstruction depends on flow direction // todo: Koren limiter which is also non-symmetrical
+			if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterForward && direction == -1)
+				_slope_limiter = std::make_unique<NoLimiterBackward>();
+
+			else if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterBackward && direction == 1)
+				_slope_limiter = std::make_unique<NoLimiterForward>();
+
 		}
 
 		/**
