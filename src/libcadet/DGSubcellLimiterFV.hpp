@@ -42,7 +42,9 @@ namespace cadet
 			Superbee = 2, //!< Superbee slope limiter
 			vanLeer = 3, //!< van Leer slope limiter
 			vanAlbada = 4, //!< van Alaba slope limiter
+			//Koren = 5, //!< Koren slope limiter // todo: can we use a 3rd order approximation, i.e. can we accomodate the MUSCL scheme/k-interpolation(vanLeer) into our setting?
 			RelaxedVanAlbada = 6, //!< relaxed van Alaba slope limiter
+			//MonotonizedCentral = 7, //!< Monotonized central slope limiter // interface change required to compute central slope
 			NoLimiterForward = -1, //!< unlimited forward FD reconstruction
 			NoLimiterBackward = -2, //!< unlimited backward FD reconstruction
 		};
@@ -215,6 +217,56 @@ namespace cadet
 		const double eps = 1e-6; // constant chosen according to https://doi.org/10.2514/3.9465
 	};
 
+	///**
+	//* @brief Monotonized central slope limiter for reconstruction
+	//* @todo change interface to compute central slope?
+	//*/
+	//class MonotonizedCentral : public SlopeLimiterFV {
+
+	//public:
+	//	MonotonizedCentral() {}
+
+	//	double minmod3(double fwdSlope, double cSlope, double bwdSlope) {
+	//		if (std::signbit(fwdSlope) == std::signbit(cSlope) && std::signbit(fwdSlope) == std::signbit(bwdSlope))
+	//			return std::copysign(std::max(std::abs(fwdSlope), std::abs(cSlope), std::abs(bwdSlope)), fwdSlope);
+	//		else
+	//			return 0.0;
+	//	}
+	//	active minmod3(active fwdSlope, active cSlope, active bwdSlope) {
+
+	//		if (std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(cSlope)) && std::signbit(static_cast<double>(fwdSlope)) == std::signbit(static_cast<double>(bwdSlope)))
+	//		{
+	//			if (abs(static_cast<double>(fwdSlope)) < abs(static_cast<double>(bwdSlope)))
+	//			{
+	//				if (abs(static_cast<double>(fwdSlope)) < abs(static_cast<double>(cSlope)))
+	//				{
+	//					return fwdSlope;
+	//				}
+	//				else return cSlope;
+	//			}
+	//			else
+	//			{
+	//				if (abs(static_cast<double>(bwdSlope)) < abs(static_cast<double>(cSlope)))
+	//				{
+	//					return bwdSlope;
+	//				}
+	//				else return cSlope;
+	//			}
+	//		}
+	//		else
+	//			return active(0.0);
+	//	}
+
+	//	double call(double fwdSlope, double bwdSlope) override {
+	//		return minmod3(2.0 * fwdSlope, cSlope, 2.0 * bwdSlope);
+	//	}
+	//	active call(active fwdSlope, active bwdSlope) override {
+	//		return minmod3(2.0 * fwdSlope, cSlope, 2.0 * bwdSlope);
+	//	}
+
+	//	SlopeLimiterID getID() override { return SlopeLimiterID::MonotonizedCentral; }
+	//};
+
 	/**
 	 * @brief Implements unlimited forward slope for reconstruction
 	 */
@@ -246,6 +298,24 @@ namespace cadet
 		}
 		SlopeLimiterID getID() override { return SlopeLimiterID::NoLimiterBackward; }
 	};
+
+	///**
+	// * @brief Implements unlimited central slope reconstruction
+	// */
+	//class NoLimiterCentral : public SlopeLimiterFV {
+
+	//public:
+	//	NoLimiterCentral() {}
+	//	double call(double fwdSlope, double bwdSlope) override {
+	//		return fwdSlope;
+	//	}
+	//	active call(active fwdSlope, active bwdSlope) override {
+	//		return fwdSlope;
+	//	}
+	// SlopeLimiterID getID() override { return SlopeLimiterID::NoLimiterCentral; }
+	//};
+
+	// todo, note: if more slope limiters are added, note that they have to be symmetrical in the current implementation (i.e. in reconstruction function reconstructedUpwindValue)
 
 	/**
 	 * @brief Implements the subcell FV limiting scheme for convection
@@ -335,13 +405,14 @@ namespace cadet
 
 		void notifyDiscontinuousSectionTransition(int direction) {
 
-			// Forward FD slope reconstruction depends on flow direction // todo: Koren limiter which is also non-symmetrical
-			if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterForward && direction == -1)
-				_slope_limiter = std::make_unique<NoLimiterBackward>();
+			if (_slope_limiter) { // only when subcell limiter is initialized, i.e. used
+				// Forward FD slope reconstruction depends on flow direction // todo: Koren limiter which is also non-symmetrical
+				if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterForward && direction == -1)
+					_slope_limiter = std::make_unique<NoLimiterBackward>();
 
-			else if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterBackward && direction == 1)
-				_slope_limiter = std::make_unique<NoLimiterForward>();
-
+				else if (_slope_limiter->getID() == SlopeLimiterFV::SlopeLimiterID::NoLimiterBackward && direction == 1)
+					_slope_limiter = std::make_unique<NoLimiterForward>();
+			}
 		}
 
 		/**

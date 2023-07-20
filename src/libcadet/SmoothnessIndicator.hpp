@@ -21,19 +21,45 @@
 
 #include "AutoDiff.hpp"
 #include <Eigen/Dense>
+#include "ParamReaderHelper.hpp"
 
 namespace cadet
 {
-
+	/**
+	 * @brief indicator to detect and assess DG elements troubled by oscillations and strong gradients
+	 */
 	class SmoothnessIndicator {
 	public:
 		virtual ~SmoothnessIndicator() {}
 		// todo: no templates for virtual functions. Is there another way to overload?
+
+		/**
+		 * @brief smoothness detector for DG element
+		 * @param [in] localC pointer to first node of current DG element
+		 * @param [in] strideNode node stride in state vector
+		 * @param [in] strideLiquid liquid phase stride in state vector
+		 * @param [in] cellIdx index of DG element
+		 */
 		virtual double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) = 0;
+		/**
+		 * @brief smoothness detector for DG element
+		 * @param [in] localC pointer to first node of current DG element
+		 * @param [in] strideNode node stride in state vector
+		 * @param [in] strideLiquid liquid phase stride in state vector
+		 * @param [in] cellIdx index of DG element
+		 */
 		virtual double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) = 0;
-		inline virtual bool timeRelaxation() = 0;
+		/**
+		 * @brief tells if and how much time relaxation is applied, i.e. change in smoothness indication is limited over time
+		 */
+		inline virtual double timeRelaxation() = 0;
+
+		virtual int configure(IParameterProvider& parameterProvider) = 0;
 	};
-	
+
+	/**
+	 * @brief dummy indicator that identifies every element as troubled with max weight 1.0
+	 */
 	class AllElementsIndicator : public SmoothnessIndicator {
 
 	public:
@@ -42,10 +68,14 @@ namespace cadet
 
 		double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override { return 1.0; }
 		double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override { return 1.0; }
-		inline bool timeRelaxation() { return false; }
+		inline double timeRelaxation() override { return false; }
+		int configure(IParameterProvider& parameterProvider) override { return 1; };
 
 	};
 
+	/**
+	 * @brief indicates troubled elements based on the relative modal energy of the two highes modes
+	 */
 	class ModalEnergyIndicator : public SmoothnessIndicator {
 
 	public:
@@ -58,7 +88,8 @@ namespace cadet
 			_modalCoeff.setZero();
 		}
 
-		inline bool timeRelaxation() { return _timeRelaxation; }
+		inline double timeRelaxation() override { return _timeRelaxation; }
+		int configure(IParameterProvider& parameterProvider) override { return 1; };
 
 		double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
 		{
@@ -120,168 +151,184 @@ namespace cadet
 		bool _timeRelaxation; //!<
 	};
 
-	//class wenoIndicator : public SmoothnessIndicator {
+	/**
+	 * @brief indicates troubled elements using slope limiters based on element-averaged and interface slopes
+	 */
+	class SlopeIndicator : public SmoothnessIndicator {
 
-	//	class WENOLimiter {
-	//	public:
-	//		virtual ~WENOLimiter() {}
-	//		virtual double call(double u0, double u1, double u2) = 0;
-	//		virtual double call(active u0, active u1, active u2) = 0;
-	//	};
+		/**
+		 * @brief slope limiters for three (consecutive) slopes
+		 */
+		class IndicatorLimiter {
+		public:
+			virtual ~IndicatorLimiter() {}
+			virtual double call(double u0, double u1, double u2) = 0;
+			virtual active call(active u0, active u1, active u2) = 0;
+		};
 
-	//	class FullLimiter : public WENOLimiter {
+		/**
+		 * @brief MINMOD slope limiter
+		 */
+		class MinmodIndicator : public IndicatorLimiter {
 
-	//	public:
-	//		FullLimiter() {}
-	//		double call(double u0, double u1, double u2) override {
-	//			return 0.0;
-	//		}
-	//		double call(active u0, active u1, active u2) override {
-	//			return 0.0;
-	//		}
-	//	};
+		public:
+			MinmodIndicator() {}
+			double call(double u0, double u1, double u2) override {
+				bool sgn = std::signbit(u0);
+				if (sgn == std::signbit(u1) && sgn == std::signbit(u2))
+					return std::copysign(std::min(std::min(std::abs(u0), std::abs(u1)), std::abs(u1)), u0);
+				else
+					return 0.0;
+			}
+			active call(active u0, active u1, active u2) override {
+				bool sgn = std::signbit(static_cast<double>(u0));
+				if (sgn == std::signbit(static_cast<double>(u1)) && sgn == std::signbit(static_cast<double>(u2)))
+				{
+					if (abs(static_cast<double>(u0)) < abs(static_cast<double>(u1)))
+					{
+						if (abs(static_cast<double>(u0)) < abs(static_cast<double>(u2)))
+							return (sgn) ? -u0 : u0;
+						else
+							return (sgn) ? -u2 : u2;
+					}
+					else if (abs(static_cast<double>(u1)) < abs(static_cast<double>(u2)))
+						return (sgn) ? -u1 : u1;
+					else
+						return (sgn) ? -u2 : u2;
+				}
+				else
+					return active(0.0);
+			}
+		};
 
-	//	class MinmodWENO : public WENOLimiter {
+		class TVBMinmodIndicator : public IndicatorLimiter {
 
-	//	public:
-	//		MinmodWENO() {}
-	//		double call(double u0, double u1, double u2) override {
-	//			if (std::signbit(u0) == std::signbit(u1) && std::signbit(u0) == std::signbit(u2))
-	//				return std::copysign(std::min(std::abs(u0), std::min(std::abs(u1), std::abs(u2))), u0);
-	//			else
-	//				return 0.0;
-	//		}
-	//		double call(active u0, active u1, active u2) override {
-	//			if (std::signbit(u0.getValue()) == std::signbit(u1.getValue()) && std::signbit(u0.getValue()) == std::signbit(u2.getValue()))
-	//				return std::copysign(std::min(std::abs(u0.getValue()), std::min(std::abs(u1.getValue()), std::abs(u2.getValue()))), u0.getValue());
-	//			else
-	//				return 0.0;
-	//		}
-	//	};
+		public:
+			TVBMinmodIndicator() {}
+			double call(double u0, double u1, double u2) override {
+				if (std::abs(u0) <= M * h * h)
+					return u0;
+				else
+					return minmod.call(u0, u1, u2);
+			}
+			active call(active u0, active u1, active u2) override {
+				if (std::abs(static_cast<double>(u0)) <= M * h * h)
+					return u0;
+				else
+					return minmod.call(u0, u1, u2);
+			}
+		private:
+			MinmodIndicator minmod;
+			active h;
+			active M;
+		};
 
-	//	class TVBMinmodWENO : public WENOLimiter {
+	public:
 
-	//	public:
-	//		TVBMinmodWENO() {}
-	//		double call(double u0, double u1, double u2) override {
-	//			if (std::abs(u0) <= M * h * h)
-	//				return u0;
-	//			else
-	//				return minmod.call(u0, u1, u2);
-	//		}
-	//		double call(active u0, active u1, active u2) override {
-	//			if (std::abs(u0.getValue()) <= M * h * h)
-	//				return static_cast<double>(u0);
-	//			else
-	//				return minmod.call(u0, u1, u2);
-	//		}
-	//	private:
-	//		MinmodWENO minmod;
-	//		active h;
-	//		active M;
-	//	};
+		SlopeIndicator(int polyDeg, int nCells, double deltaZ, Eigen::VectorXd LGLweights, Eigen::MatrixXd polyDerM, std::string limiter, bool timeRelax)
+			: _polyDeg(polyDeg), _nCells(nCells), _deltaZ(deltaZ), _LGLweights(LGLweights), _polyDerM(polyDerM), _timeRelaxation(timeRelax)
+		{
+			_nNodes = _polyDeg + 1;
+		}
 
-	//public:
+		inline double timeRelaxation() override { return _timeRelaxation; } // todo time relaxation required in this indicator which is either 1 or 0?
+		int configure(IParameterProvider& paramProvider) override
+		{
+			_deltaZ = paramProvider.getDouble("COL_LENGTH") / _nCells;
+			return 1;
+		};
 
-	//	wenoIndicator(int polyDeg, const Eigen::MatrixXd& modalVanInv, double modalCoefThreshold, double nodalCoefThreshold, double nodalCoefShift)
-	//		: _polyDeg(polyDeg)
-	//	{
-	//		_nNodes = _polyDeg + 1;
-	//	}
+		double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
+		{
+			Eigen::Map<const Eigen::Vector<double, Eigen::Dynamic>, 0, Eigen::InnerStride<Eigen::Dynamic>> _C(localC, _nNodes, Eigen::InnerStride<Eigen::Dynamic>(strideNode));
 
-	//	double calcSmoothness(const double* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
-	//	{
-	//		Eigen::Map<const Eigen::Vector<double, Dynamic>, 0, InnerStride<Dynamic>> _C(localC, _nNodes, InnerStride<Dynamic>(strideNode));
+			if (cellIdx > 0 && cellIdx < _nCells - 1) // todo boundary treatment
+			{
+				// todo store mass matrix and LGL weights additionally to respective inverse
+				// todo overwrite values instead of recalculation // todo deltaZ ParamType
+				_pAvg0 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx - 1) * _nNodes, _nNodes).array()).sum();
+				_pAvg1 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment(cellIdx * _nNodes, _nNodes).array()).sum();
+				_pAvg2 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx + 1) * _nNodes, _nNodes).array()).sum();
 
-	//		if (cellIdx > 0 && cellIdx < _nCells - 1) // todo boundary treatment
-	//		{
-	//			// todo store mass matrix and LGL weights additionally to respective inverse
-	//			// todo overwrite values instead of recalculation // todo deltaZ ParamType
-	//			_pAvg0 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx - 1) * _nNodes, _nNodes).array()).sum();
-	//			_pAvg1 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment(cellIdx * _nNodes, _nNodes).array()).sum();
-	//			_pAvg2 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx + 1) * _nNodes, _nNodes).array()).sum();
+				_uTilde = _C[cellIdx * _nNodes + _nNodes - 1] - _pAvg1; // average minus inner interface value on right face
+				_u2Tilde = _pAvg1 - _C[cellIdx * _nNodes]; // average minus inner interface value on left face
 
-	//			_uTilde = _C[cellIdx * _nNodes + _nNodes - 1] - _pAvg1; // average minus inner interface value on right face
-	//			_u2Tilde = _pAvg1 - _C[cellIdx * _nNodes]; // average minus inner interface value on left face
+				double trigger1 = indicatorLimiter->call(_uTilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
+				double trigger2 = indicatorLimiter->call(_u2Tilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
 
-	//			double trigger1 = weno_limiter->call(_uTilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
-	//			double trigger2 = weno_limiter->call(_u2Tilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
+				double M2 = (_polyDerM * _polyDerM * _C.segment(cellIdx * _nNodes, _nNodes)).maxCoeff();
+				//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
+				double M_ = 2.0 / 3.0 * M2;
+				//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
 
-	//			double M2 = (_polyDerM * _polyDerM * _C.segment(cellIdx * _nNodes, _nNodes)).maxCoeff();
-	//			//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
-	//			double M_ = 2.0 / 3.0 * M2;
-	//			//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
+				// reconstruct if cell is troubled, i.e. potential oscillations
+				if (abs(trigger1 - _uTilde) > 1e-8 || abs(trigger2 - _u2Tilde) > 1e-8)
+				{
+					if (abs(_uTilde) > M_ * _deltaZ * _deltaZ || abs(_u2Tilde) > M_ * _deltaZ * _deltaZ)
+						return 1.0;
+				}
+			}
+			return 0.0;
+		}
+		double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
+		{
+			Eigen::Map<const Eigen::Vector<active, Eigen::Dynamic>, 0, Eigen::InnerStride<Eigen::Dynamic>> _C(localC, _nNodes, Eigen::InnerStride<Eigen::Dynamic>(strideNode));
 
-	//			// reconstruct if cell is troubled, i.e. potential oscillations
-	//			if (abs(trigger1 - _uTilde) > 1e-8 || abs(trigger2 - _u2Tilde) > 1e-8)
-	//			{
-	//				if (abs(_uTilde) > M_ * _deltaZ * _deltaZ || abs(_u2Tilde) > M_ * _deltaZ * _deltaZ)
-	//					// mark troubled cell
-	//					//troubled_cells[comp + cell * _nComp] = 1.0;
-	//					int i = 0;
-	//			}
-	//		}
-	//		return 0.0;
-	//	}
-	//	double calcSmoothness(const active* const localC, const int strideNode, const int strideLiquid, const int cellIdx) override
-	//	{
-	//		Eigen::Map<const Eigen::Vector<active, Dynamic>, 0, InnerStride<Dynamic>> _C(localC, _nNodes, InnerStride<Dynamic>(strideNode));
+			if (cellIdx > 0 && cellIdx < _nCells - 1) // todo boundary treatment
+			{
+				// todo store mass matrix and LGL weights additionally to respective inverse
+				// todo overwrite values instead of recalculation // todo deltaZ ParamType
+				_pAvg0 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx - 1) * _nNodes, _nNodes).template cast<double>().array()).sum();
+				_pAvg1 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment(cellIdx * _nNodes, _nNodes).template cast<double>().array()).sum();
+				_pAvg2 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx + 1) * _nNodes, _nNodes).template cast<double>().array()).sum();
 
-	//		if (cellIdx > 0 && cellIdx < _nCells - 1) // todo boundary treatment
-	//		{
-	//			// todo store mass matrix and LGL weights additionally to respective inverse
-	//			// todo overwrite values instead of recalculation // todo deltaZ ParamType
-	//			_pAvg0 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx - 1) * _nNodes, _nNodes).template cast<double>().array()).sum();
-	//			_pAvg1 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment(cellIdx * _nNodes, _nNodes).template cast<double>().array()).sum();
-	//			_pAvg2 = 1.0 / static_cast<double>(_deltaZ) * (_LGLweights.array() * _C.segment((cellIdx + 1) * _nNodes, _nNodes).template cast<double>().array()).sum();
+				_uTilde = static_cast<double>(_C[cellIdx * _nNodes + _nNodes - 1]) - _pAvg1; // average minus inner interface value on right face
+				_u2Tilde = _pAvg1 - static_cast<double>(_C[cellIdx * _nNodes]); // average minus inner interface value on left face
 
-	//			_uTilde = static_cast<double>(_C[cellIdx * _nNodes + _nNodes - 1]) - _pAvg1; // average minus inner interface value on right face
-	//			_u2Tilde = _pAvg1 - static_cast<double>(_C[cellIdx * _nNodes]); // average minus inner interface value on left face
+				double trigger1 = indicatorLimiter->call(_uTilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
+				double trigger2 = indicatorLimiter->call(_u2Tilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
 
-	//			double trigger1 = weno_limiter->call(_uTilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
-	//			double trigger2 = weno_limiter->call(_u2Tilde, _pAvg2 - _pAvg1, _pAvg1 - _pAvg0);
+				double M2 = (_polyDerM * _polyDerM * _C.segment(cellIdx * _nNodes, _nNodes).template cast<double>()).maxCoeff();
+				//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
+				double M_ = 2.0 / 3.0 * M2;
+				//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
 
-	//			double M2 = (_polyDerM * _polyDerM * _C.segment(cellIdx * _nNodes, _nNodes).template cast<double>()).maxCoeff();
-	//			//double u_x = (_polyDerM * _C.segment(cell * _nNodes, _nNodes)).maxCoeff();
-	//			double M_ = 2.0 / 3.0 * M2;
-	//			//double hmpf = 2.0 / 9.0 * (3.0 + 10.0 * M2) * M2 * _deltaZ / (_deltaZ + 2.0 * u_x * _deltaZ);
+				// reconstruct if cell is troubled, i.e. potential oscillations
+				if (abs(trigger1 - _uTilde) > 1e-8 || abs(trigger2 - _u2Tilde) > 1e-8)
+				{
+					if (abs(_uTilde) > M_ * _deltaZ * _deltaZ || abs(_u2Tilde) > M_ * _deltaZ * _deltaZ)
+						return 1.0;
+				}
+			}
+			return 0.0;
+		}
 
-	//			// reconstruct if cell is troubled, i.e. potential oscillations
-	//			if (abs(trigger1 - _uTilde) > 1e-8 || abs(trigger2 - _u2Tilde) > 1e-8)
-	//			{
-	//				if (abs(_uTilde) > M_ * _deltaZ * _deltaZ || abs(_u2Tilde) > M_ * _deltaZ * _deltaZ)
-	//					// mark troubled cell
-	//					//troubled_cells[comp + cell * _nComp] = 1.0;
-	//					int i = 0;
-	//			}
-	//		}
-	//		return 0.0;
-	//	}
+		double getCellAverage(int cellIdx) {
+			switch (cellIdx)
+			{
+			case 0: return _pAvg0; case 1: return _pAvg1; case 2: return _pAvg0; default: return 0.0;
+			}
+		}
 
-	//	double getCellAverage(int cellIdx) {
-	//		switch (cellIdx)
-	//		{
-	//		case 0: return _pAvg0; case 1: return _pAvg1; case 2: return _pAvg0; default: return 0.0;
-	//		}
-	//	}
+	private:
 
-	//private:
+		int _nNodes; //!< Number of polynomial interpolation nodes of DG ansatz
+		int _polyDeg; //!< Polynomial degree of DG ansatz
+		int _nCells; //!< Number of DG cells/elements
+		double _deltaZ;
+		Eigen::VectorXd _LGLweights;
+		Eigen::MatrixXd _polyDerM;
 
-	//	int _nNodes; //!< Number of polynomial interpolation nodes of DG ansatz
-	//	int _polyDeg; //!< Polynomial degree of DG ansatz
-	//	int _nCells; //!< Number of DG cells/elements
-	//	double _deltaZ;
-	//	Eigen::VectorXd _LGLweights;
-	//	Eigen::MatrixXd _polyDerM;
+		std::unique_ptr<IndicatorLimiter> indicatorLimiter;
 
-	//	std::unique_ptr<WENOLimiter> weno_limiter;
+		double _pAvg0;
+		double _pAvg1;
+		double _pAvg2;
+		double _uTilde;
+		double _u2Tilde;
 
-	//	double _pAvg0;
-	//	double _pAvg1;
-	//	double _pAvg2;
-	//	double _uTilde;
-	//	double _u2Tilde;
-	//};
+		double _timeRelaxation;
+	};
 }
 
 #endif // LIBCADET_SMOOTHNESSINDICATOR_HPP_
