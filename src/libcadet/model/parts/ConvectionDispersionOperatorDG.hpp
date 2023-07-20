@@ -126,7 +126,7 @@ namespace cadet
 				inline unsigned int nNodes() const CADET_NOEXCEPT { return _nNodes; }
 				inline unsigned int nPoints() const CADET_NOEXCEPT { return _nPoints; }
 				inline bool exactInt() const CADET_NOEXCEPT { return _exactInt; }
-				inline bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return static_cast<bool>(_OSmode); } // only zero if no oscillation suppression
+				inline bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return _calc_smoothness_indicator; }
 				inline double* smoothnessIndicator() const CADET_NOEXCEPT
 				{
 					if (hasSmoothnessIndicator())
@@ -194,9 +194,9 @@ namespace cadet
 				double _maxBlending; //!< maximal blending coefficient of oscillation suppression mechanism
 				double _blendingThreshold; //!< Threshold to clip-off blending coefficient
 				WenoDG _weno; //!< WENO operator
-				DGSubcellLimiterFV _subcellLimiter;
-				std::unique_ptr<SmoothnessIndicator> _smoothnessIndicator;
-				double* _troubledCells; //!< Troubled/oscillatory DG cell indicator
+				DGSubcellLimiterFV _subcellLimiter; //!< FV subcell limiting operator
+				std::unique_ptr<SmoothnessIndicator> _smoothnessIndicator; //!< smoothness/troubled-element indicator
+				double* _troubledCells; //!< troubled-element indicator values
 				bool _calc_smoothness_indicator; //!< Determines whether or not the smoothness indicator is evaluated
 
 				// Simulation parameters

@@ -144,17 +144,19 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 			if (numModes != 1 && numModes != 2)
 				throw InvalidParameterException("Number of modes to compare modal energy must be 1 or 2, but was specified as " + std::to_string(numModes));
 
-			bool timeRelaxation = paramProvider.exists("TIME_RELAXATION") ? paramProvider.getBool("TIME_RELAXATION") : false;
+			double timeRelaxation = paramProvider.exists("TIME_RELAXATION") ? paramProvider.getDouble("TIME_RELAXATION") : 0.0; // todo default value (0.7 was chosen in https://doi.org/10.1016/j.jcp.2021.110580)
 			
 			_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_LEGENDRE().inverse(), numModes, nodalCoefThreshold, nodalCoefShift, timeRelaxation);
 		}
-		//else if (smoothness_indicator == "MODAL_ENERGY_PRIMITIVE") // todo? add other modal polynomial bases
-		//{
-		//	double modalCoefThreshold = paramProvider.exists("MODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("MODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
-		//	double nodalCoefThreshold = paramProvider.exists("NODAL_COEFFICIENT_THRESHOLD") ? paramProvider.getDouble("NODAL_COEFFICIENT_THRESHOLD") : 0.0; // 1e-12; // todo default value
-		//	double nodalCoefShift = paramProvider.exists("NODAL_COEFFICIENT_SHIFT") ? paramProvider.getDouble("NODAL_COEFFICIENT_SHIFT") : 0.0; // 0.1; // todo default value
-		//	_smoothnessIndicator = std::make_unique<ModalEnergyIndicator>(_polyDeg, getVandermonde_PRIMITIVE().inverse(), nodalCoefThreshold, nodalCoefShift);
-		//}
+		else if (smoothness_indicator == "SLOPE_LIMITER")
+		{
+			const std::string limiter = paramProvider.exists("INDICATOR_LIMITER") ? paramProvider.getString("INDICATOR_LIMITER") : "MINMOD"; // todo choose default
+			// todo time relaxation not required for this indicator (either 1 or zero) ?
+			//double timeRelaxation = paramProvider.exists("TIME_RELAXATION") ? paramProvider.getDouble("TIME_RELAXATION") : 0.0; // todo default value (0.7 was chosen in https://doi.org/10.1016/j.jcp.2021.110580)
+			double timeRelaxation = 0.0;
+			// note that deltaZ is set in configure()
+			_smoothnessIndicator = std::make_unique<SlopeIndicator>(_polyDeg, _nCells, 0.0, _invWeights.cwiseInverse(), _polyDerM, limiter, timeRelaxation);
+		}
 		else if (smoothness_indicator == "ALL_ELEMENTS")
 			_smoothnessIndicator = std::make_unique<AllElementsIndicator>();
 		else
@@ -207,6 +209,9 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 		paramProvider.popScope();
 	}
+	else
+		_smoothnessIndicator = nullptr;
+
 	paramProvider.popScope();
 
 	return true;
@@ -227,6 +232,8 @@ bool AxialConvectionDispersionOperatorBaseDG::configure(UnitOpIdx unitOpIdx, IPa
 	_deltaZ = _colLength / _nCells;
 	if (_OSmode == 1)
 		_weno.setDeltaZ(_deltaZ);
+	if (_OSmode)
+		_smoothnessIndicator->configure(paramProvider);
 
 	/* compute dispersion jacobian blocks(without parameters except element spacing, i.e. static entries) */
 	// we only need unique dispersion blocks, which are given by cells 1, 2, nCol for inexact integration DG and by cells 1, 2, 3, nCol-1, nCol for eaxct integration DG
@@ -483,7 +490,7 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		Eigen::Map<Vector<StateType, Dynamic>, 0, InnerStride<>> _g(reinterpret_cast<StateType*>(&_g[0]), _nPoints, InnerStride<>(1));
 
 		// Calculate smoothness indicator if oscillation suppression is active
-		if (_OSmode != 0 && _OSmode != 4)
+		if (_calc_smoothness_indicator)
 		{
 			double oldIndicator = 0.0;
 
@@ -494,12 +501,12 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 				_troubledCells[comp + cell * _nComp] = std::min(_maxBlending, _smoothnessIndicator->calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, _nComp, cell));
 				if (_troubledCells[comp + cell * _nComp] < _blendingThreshold)
 					_troubledCells[comp + cell * _nComp] = 0.0;
-				else if (_smoothnessIndicator->timeRelaxation())
-					_troubledCells[comp + cell * _nComp] = std::max(0.7 * oldIndicator, _troubledCells[comp + cell * _nComp]);
+				else if (_smoothnessIndicator->timeRelaxation()) // note: 0.0 <-> no relaxation
+					_troubledCells[comp + cell * _nComp] = std::max(_smoothnessIndicator->timeRelaxation() * oldIndicator, _troubledCells[comp + cell * _nComp]);
 			}
 			//if (_OSmode == 1) // WENO
 			//{
-			//	// todo: store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
+			//	// todo: calculate and store reconstructed polynomial in h, calculate g from h and then set h = 2.0 / deltaZ * (-u * h + d_ax * (-2.0 / deltaZ) * g);
 			//}
 		}
 
