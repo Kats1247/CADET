@@ -302,6 +302,7 @@ namespace cadet
 				virtual bool hasParticleMobilePhase() const CADET_NOEXCEPT { return false; }
 				virtual bool hasSolidPhase() const CADET_NOEXCEPT { return _disc.strideBound > 0; }
 				virtual bool hasVolume() const CADET_NOEXCEPT { return false; }
+				virtual bool isParticleLumped() const CADET_NOEXCEPT { return false; }
 				virtual bool hasSmoothnessIndicator() const CADET_NOEXCEPT { return _model._convDispOp.hasSmoothnessIndicator(); }
 
 				virtual unsigned int primaryPolynomialDegree() const CADET_NOEXCEPT { return _disc.polyDeg; }

@@ -125,16 +125,11 @@ public:
 		_nInletPorts = exporter.numInletPorts();
 		_nOutletPorts = exporter.numOutletPorts();
 
-<<<<<<< HEAD
 		_keepParticleSingletonDim = !exporter.isParticleLumped();
 
-		_nAxialCells = exporter.numPrimaryCoordinates();
-		_nRadialCells = exporter.numSecondaryCoordinates();
-=======
 		_nAxialPoints = exporter.numPrimaryCoordinates();
 		_nRadialPoints = exporter.numSecondaryCoordinates();
 		_axialPolyDeg = exporter.primaryPolynomialDegree();
->>>>>>> 47eb13b (add infrastructure to export troubled cells)
 
 		// Query particle type specific structure
 		const unsigned int numParTypes = exporter.numParticleTypes();
