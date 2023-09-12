@@ -192,7 +192,7 @@ namespace cadet
 				// non-linear oscillation prevention mechanism
 				int _OSmode; //!< oscillation suppression mode; 0 : none, 1 : WENO, 2 : Subcell limiting
 				double _maxBlending; //!< maximal blending coefficient of oscillation suppression mechanism
-				double _blendingThreshold; //!< Threshold to clip-off blending coefficient
+				double _blendingThreshold; //!< Threshold to clip-off blending coefficient (in both directions)
 				WenoDG _weno; //!< WENO operator
 				DGSubcellLimiterFV _subcellLimiter; //!< FV subcell limiting operator
 				std::unique_ptr<SmoothnessIndicator> _smoothnessIndicator; //!< smoothness/troubled-element indicator

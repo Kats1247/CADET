@@ -115,7 +115,7 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 	paramProvider.pushScope("discretization");
 	_OSmode = 0;
-	_maxBlending = 0.0;
+	_maxBlending = 1.0;
 	_blendingThreshold = 0.0;
 	_troubledCells = nullptr;
 
@@ -128,7 +128,10 @@ bool AxialConvectionDispersionOperatorBaseDG::configureModelDiscretization(IPara
 
 		const bool write_smoothness_indicator = paramProvider.exists("RETURN_SMOOTHNESS_INDICATOR") ? static_cast<bool>(paramProvider.getInt("RETURN_SMOOTHNESS_INDICATOR")) : false;
 		if (write_smoothness_indicator)
+		{
 			_troubledCells = new double[nCells * nComp];
+			std::fill(_troubledCells, _troubledCells + nCells * nComp, 0.0);
+		}
 
 		std::string smoothness_indicator = paramProvider.exists("SMOOTHNESS_INDICATOR") ? paramProvider.getString("SMOOTHNESS_INDICATOR") : "MODAL_ENERGY_LEGENDRE";
 
@@ -501,7 +504,9 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 				_troubledCells[comp + cell * _nComp] = std::min(_maxBlending, _smoothnessIndicator->calcSmoothness(y + offsetC() + comp + cell * _strideCell, _strideNode, _nComp, cell));
 				if (_troubledCells[comp + cell * _nComp] < _blendingThreshold)
 					_troubledCells[comp + cell * _nComp] = 0.0;
-				else if (_smoothnessIndicator->timeRelaxation()) // note: 0.0 <-> no relaxation
+				else if (1.0 - _troubledCells[comp + cell * _nComp] < _blendingThreshold)
+					_troubledCells[comp + cell * _nComp] = 1.0;
+				else if (_smoothnessIndicator->timeRelaxation()) // note: 0.0 <-> no time relaxation
 					_troubledCells[comp + cell * _nComp] = std::max(_smoothnessIndicator->timeRelaxation() * oldIndicator, _troubledCells[comp + cell * _nComp]);
 			}
 			//if (_OSmode == 1) // WENO
@@ -559,14 +564,19 @@ int AxialConvectionDispersionOperatorBaseDG::residualImpl(const IModel& model, d
 		// ========================================//
 
 		// Calculate the substitute h(g(c), c) and apply inverse mapping jacobian (reference space)
-		if (DGblending < 1.0)
+		if (_OSmode != 0)
 		{
-			for (int cell = 0; cell < _nCells; cell++)
-				_h.segment(cell * _nNodes, _nNodes) = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C.segment(cell * _nNodes, _nNodes) * (1.0 - _troubledCells[comp + cell * _nComp])).template cast<ResidualType>();
-			_h += (2.0 / static_cast<ParamType>(_deltaZ) * d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
+			if (DGblending < 1.0)
+			{
+				for (int cell = 0; cell < _nCells; cell++)
+					_h.segment(cell * _nNodes, _nNodes) = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C.segment(cell * _nNodes, _nNodes) * (1.0 - _troubledCells[comp + cell * _nComp])).template cast<ResidualType>();
+				_h += (2.0 / static_cast<ParamType>(_deltaZ) * d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
+			}
+			else
+				_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * DGblending + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 		}
 		else
-			_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C * DGblending + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
+			_h = 2.0 / static_cast<ParamType>(_deltaZ) * (-u * _C + d_ax * (-2.0 / static_cast<ParamType>(_deltaZ)) * _g).template cast<ResidualType>();
 
 		// DG volume integral in strong form
 		volumeIntegral<ResidualType, ResidualType>(_h, _resC);
