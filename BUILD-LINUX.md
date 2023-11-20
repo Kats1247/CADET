@@ -9,7 +9,7 @@ Assumed directory structure:
 <pre>
 &lt;ROOT&gt;
    |-code
-   |-cadet
+   |-install
    |-build
 </pre>
 
@@ -33,19 +33,17 @@ Obtain LAPACK from your distribution:
 
 
 ## Build CADET
-
-- Download or git clone the CADET source code
-- Place the source in `<ROOT>\code`
-- Create the directories `<ROOT>\build` and `<ROOT>\cadet`
-
+- Create the `<ROOT>` folder
+- Clone the CADET source code `git clone https://github.com/modsim/CADET.git <ROOT>/code`
+- Create the directories `<ROOT>/build` and `<ROOT>/install`
 
 - Open a terminal and change to `<ROOT>/build`
 - If using MKL, execute `export MKLROOT=/opt/intel/mkl`
-- Using standard LAPACK: Execute `cmake -DCMAKE_INSTALL_PREFIX="../cadet" ../code/`
+- Using standard LAPACK: Execute `cmake -DCMAKE_INSTALL_PREFIX="../install" ../code/`
  
-   - Using MKL (sequential): Execute `cmake -DCMAKE_INSTALL_PREFIX="../cadet" -DBLA_VENDOR=Intel10_64lp_seq ../code/`
+   - Using MKL (sequential): Execute `cmake -DCMAKE_INSTALL_PREFIX="../install" -DBLA_VENDOR=Intel10_64lp_seq ../code/`
  
-   - Using MKL (parallel): Execute `cmake -DCMAKE_INSTALL_PREFIX="../cadet" -DBLA_VENDOR=Intel10_64lp ../code/`
+   - Using MKL (parallel): Execute `cmake -DCMAKE_INSTALL_PREFIX="../install" -DBLA_VENDOR=Intel10_64lp ../code/`
 
 - Execute `make`
 - Execute `make install`

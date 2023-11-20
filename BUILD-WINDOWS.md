@@ -16,7 +16,7 @@ Assumed directory structure:
 <pre>
 &lt;ROOT&gt;
    |-code
-   |-cadet
+   |-install
    |-build
 </pre>
 
@@ -45,9 +45,9 @@ We are using Visual Studio because it is the easiest way to install all required
 
 ## Prepare CADET code
 
-- Download or git clone the CADET source code
-- Place the source in `<ROOT>\code`
-- Create the directories `<ROOT>\build` and `<ROOT>\cadet`
+- Create the `<ROOT>` folder
+- Clone the CADET source code `git clone https://github.com/modsim/CADET.git <ROOT>\code`
+- Create the directories `<ROOT>\build` and `<ROOT>\install`
 
 ## Build CADET
 
@@ -58,26 +58,26 @@ We are using Visual Studio because it is the easiest way to install all required
     - `cd <ROOT>\build`
     - `vcpkg integrate install` (this only needs to be run _once_ and will require admin privileges)
     - `set MKLROOT="C:/Program Files (x86)/Intel/oneAPI/mkl/latest"`
-    - `cmake -DCMAKE_INSTALL_PREFIX=..\cadet -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp_seq --fresh ..\code\`
+    - `cmake -DCMAKE_INSTALL_PREFIX=..\install -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp_seq --fresh ..\code\`
         - If you want to use parallelization and have installed TBB, instead
           execute `set TBBROOT="C:/Program Files (x86)/Intel/oneAPI/tbb/latest"` and
-        - `cmake -DCMAKE_INSTALL_PREFIX=..\cadet -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp --fresh ..\code\`
+        - `cmake -DCMAKE_INSTALL_PREFIX=..\install -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp --fresh ..\code\`
     - `msbuild.exe INSTALL.vcxproj /p:Configuration=Release;Platform=x64`
   
 - For PowerShell:
     - `cd <ROOT>\build`
     - `vcpkg integrate install` (this only needs to be run _once_ and will require admin privileges)
     - `$ENV:MKLROOT = "C:\Program Files (x86)\Intel\oneAPI\mkl\latest"`
-    - `cmake -DCMAKE_INSTALL_PREFIX="..\cadet" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$ENV:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp_seq "..\code\" --fresh`
+    - `cmake -DCMAKE_INSTALL_PREFIX="..\install" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$ENV:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp_seq "..\code\" --fresh`
       - If you want to use parallelization and have installed TBB, instead
            execute `$ENV:TBBROOT = "C:\Program Files (x86)\Intel\oneAPI\tbb\latest"`
       and 
-      - `cmake -DCMAKE_INSTALL_PREFIX="..\cadet" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$ENV:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp "..\code\" --fresh`
+      - `cmake -DCMAKE_INSTALL_PREFIX="..\install" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$ENV:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DENABLE_STATIC_LINK_LAPACK=ON -DENABLE_STATIC_LINK_DEPS=ON -DBLA_VENDOR=Intel10_64lp "..\code\" --fresh`
     - `msbuild.exe INSTALL.vcxproj /p:Configuration="Release;Platform=x64"`
-- The binaries will be located in `<ROOT>\cadet\bin`
+- The binaries will be located in `<ROOT>\install\bin`
 
 ## Test build results
-- Navigate to the install location `cd <ROOT>\cadet\bin`
+- Navigate to the install location `cd <ROOT>\install\bin`
 - Run:
   - `cadet-cli.exe --version`
   - `createLWE.exe`
